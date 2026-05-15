@@ -22,24 +22,61 @@ class YOLOWriter:
         self.localImgPath = localImgPath
         self.verified = False
 
-    def addBndBox(self, xmin, ymin, xmax, ymax, name, difficult):
+    def addBndBox(self, xmin, ymin, xmax, ymax, name, difficult, score=None):
         bndbox = {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}
         bndbox['name'] = name
         bndbox['difficult'] = difficult
+        if score is not None:
+            bndbox['score'] = float(score)
+        elif isinstance(difficult, (int, float)) and not isinstance(difficult, bool):
+            try:
+                d = float(difficult)
+                if 0.0 <= d <= 1.0:
+                    bndbox['score'] = d
+            except (TypeError, ValueError):
+                pass
         self.boxlist.append(bndbox)
 
-    def addPolygon(self, points, name, difficult):
+    def addPolygon(self, points, name, difficult, score=None):
         polygon = {'points': points}
         polygon['name'] = name
         polygon['difficult'] = difficult
+        if score is not None:
+            polygon['score'] = float(score)
+        elif isinstance(difficult, (int, float)) and not isinstance(difficult, bool):
+            try:
+                d = float(difficult)
+                if 0.0 <= d <= 1.0:
+                    polygon['score'] = d
+            except (TypeError, ValueError):
+                pass
         self.boxlist.append(polygon)
 
-    def addKeypoints(self, points, visibility, name, difficult):
+    def addKeypoints(self, points, visibility, name, difficult, score=None):
         pose = {'points': points, 'visibility': visibility}
         pose['name'] = name
         pose['difficult'] = difficult
         pose['shape_type'] = 'keypoints'
+        if score is not None:
+            pose['score'] = float(score)
+        elif isinstance(difficult, (int, float)) and not isinstance(difficult, bool):
+            try:
+                d = float(difficult)
+                if 0.0 <= d <= 1.0:
+                    pose['score'] = d
+            except (TypeError, ValueError):
+                pass
         self.boxlist.append(pose)
+
+    @staticmethod
+    def _line_score_suffix(box):
+        sc = box.get('score')
+        if sc is None:
+            return ''
+        try:
+            return ' %.6f' % float(sc)
+        except (TypeError, ValueError):
+            return ''
 
     def BndBox2YoloLine(self, box, classList=[]):
         xmin = box['xmin']
@@ -143,22 +180,29 @@ class YOLOWriter:
                 if pose_line is not None:
                     classIndex, xcen, ycen, w, h, kpts = pose_line
                     out_file.write(
-                        "%d %.6f %.6f %.6f %.6f %s\n" % (
+                        "%d %.6f %.6f %.6f %.6f %s%s\n" % (
                             classIndex, xcen, ycen, w, h,
                             " ".join(["%.6f" % p if (idx % 3) != 2 else str(int(p))
-                                      for idx, p in enumerate(kpts)])
+                                      for idx, p in enumerate(kpts)]),
+                            self._line_score_suffix(box),
                         )
                     )
             elif 'points' in box:
                 classIndex, points = self.Polygon2YoloLine(box, classList)
                 if len(points) >= 6:
                     out_file.write(
-                        "%d %s\n" % (classIndex, " ".join(["%.6f" % p for p in points]))
+                        "%d %s%s\n" % (
+                            classIndex,
+                            " ".join(["%.6f" % p for p in points]),
+                            self._line_score_suffix(box),
+                        )
                     )
             else:
                 classIndex, xcen, ycen, w, h = self.BndBox2YoloLine(box, classList)
-                # print (classIndex, xcen, ycen, w, h)
-                out_file.write("%d %.6f %.6f %.6f %.6f\n" % (classIndex, xcen, ycen, w, h))
+                out_file.write(
+                    "%d %.6f %.6f %.6f %.6f%s\n" % (
+                        classIndex, xcen, ycen, w, h, self._line_score_suffix(box))
+                )
 
         # print (classList)
         # print (out_class_file)
@@ -268,24 +312,38 @@ class YoloReader:
             if not values:
                 continue
 
-            # YOLO detection format: class cx cy w h
-            if len(values) == 5:
-                classIndex, xcen, ycen, w, h = values
+            def _trailing_score(vals):
+                if len(vals) < 2:
+                    return vals, None
+                try:
+                    sc = float(vals[-1])
+                    if 0.0 <= sc <= 1.0:
+                        return vals[:-1], sc
+                except (TypeError, ValueError):
+                    pass
+                return vals, None
+
+            # YOLO detection format: class cx cy w h [score]
+            if len(values) in (5, 6):
+                vals, score = (values, None) if len(values) == 5 else _trailing_score(values)
+                if len(vals) != 5:
+                    vals, score = values[:5], (float(values[5]) if len(values) == 6 else None)
+                classIndex, xcen, ycen, w, h = vals
                 label, xmin, ymin, xmax, ymax = self.yoloLine2Shape(classIndex, xcen, ycen, w, h)
-                # Caveat: difficult flag is discarded when saved as yolo format.
-                self.addShape(label, xmin, ymin, xmax, ymax, False)
+                diff = score if score is not None else False
+                self.addShape(label, xmin, ymin, xmax, ymax, diff)
                 continue
 
-            # YOLO pose format (Ultralytics): class cx cy w h (x y v)...
-            if len(values) >= 8 and (len(values) - 5) % 3 == 0:
-                # Use visibility triplet check to distinguish pose vs segmentation.
+            # YOLO pose format (Ultralytics): class cx cy w h (x y v)... [score]
+            vals_pose, score_pose = _trailing_score(values)
+            if len(vals_pose) >= 8 and (len(vals_pose) - 5) % 3 == 0:
                 is_pose_line = True
-                nk = (len(values) - 5) // 3
+                nk = (len(vals_pose) - 5) // 3
                 if self.posed_kpts_count is not None and nk != int(self.posed_kpts_count):
                     is_pose_line = False
-                for i in range(7, len(values), 3):
+                for i in range(7, len(vals_pose), 3):
                     try:
-                        v = int(float(values[i]))
+                        v = int(float(vals_pose[i]))
                     except Exception:
                         is_pose_line = False
                         break
@@ -293,13 +351,16 @@ class YoloReader:
                         is_pose_line = False
                         break
                 if is_pose_line:
-                    label, points, visibility = self.yoloLine2Keypoints(values)
+                    label, points, visibility = self.yoloLine2Keypoints(vals_pose)
                     if len(points) >= 1:
-                        self.addKeypointShape(label, points, visibility, False)
+                        diff = score_pose if score_pose is not None else False
+                        self.addKeypointShape(label, points, visibility, diff)
                     continue
 
-            # YOLO segmentation format: class x1 y1 x2 y2 ...
-            if len(values) >= 7 and (len(values) - 1) % 2 == 0:
-                label, points = self.yoloLine2Polygon(values)
+            # YOLO segmentation format: class x1 y1 x2 y2 ... [score]
+            vals_seg, score_seg = _trailing_score(values)
+            if len(vals_seg) >= 7 and (len(vals_seg) - 1) % 2 == 0:
+                label, points = self.yoloLine2Polygon(vals_seg)
                 if len(points) >= 3:
-                    self.addPolygonShape(label, points, False)
+                    diff = score_seg if score_seg is not None else False
+                    self.addPolygonShape(label, points, diff)

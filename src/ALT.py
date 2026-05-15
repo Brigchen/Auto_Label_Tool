@@ -235,14 +235,14 @@ class train_one(QThread):
         self.epochs = int(kwargs.get("epochs"))
         self.optimizer = kwargs.get('optimizer')
         self.lr0 = float(kwargs.get('lr0'))
+        self.name = (kwargs.get('name') or '').strip()
+        self.task = (kwargs.get('task') or 'detect').strip()
     def run(self):
         try:
             if torch.cuda.is_available():
                 if torch.cuda.device_count() > 1:
                     gpuid, free_mem, bsize = get_cuda_setup(24,24)
-                    # print(torch.cuda.get_device_capability('cuda:2'))
                     device = "%d"%gpuid
-                    # print(torch.cuda.device_count())
                 else:
                     device = "0"
             else:
@@ -252,7 +252,21 @@ class train_one(QThread):
             if w != self.weights:
                 print('[train] resolved weights:', self.weights, '->', w)
             model = YOLO(w)
-            model.train(data=self.data, batch=self.bsize, imgsz=self.imgsz, epochs=self.epochs, optimizer=self.optimizer, lr0=self.lr0, device=device)
+            train_kw = dict(
+                data=self.data,
+                batch=self.bsize,
+                imgsz=self.imgsz,
+                epochs=self.epochs,
+                optimizer=self.optimizer,
+                lr0=self.lr0,
+                device=device,
+            )
+            if self.name:
+                train_kw['name'] = self.name
+            t = (self.task or 'detect').lower()
+            if t not in ('detect', 'det', ''):
+                train_kw['task'] = t
+            model.train(**train_kw)
             self.str_signal.emit('done')
         except Exception as e:
             self.str_signal.emit(print_error())
@@ -527,40 +541,51 @@ class MainWindow(QMainWindow, WindowMixin):
         # action()函数的输入参数，第一个str是显示按钮的名称，第二个是对应的触发函数，第三个是快捷键，第四个是icon
         
         #增加的action：
-        load_label_names=action("load label names", self.load_label_names,'Ctrl+0', 'file')
-        search_system=action('Search_System', self.search_actions_info,None,'zoom-in')
-        batch_rename_img=action('batch_rename_img', self.batch_rename_img, 'Ctrl+1','edit')
-        rename_img_xml=action('rename_img_xml', self.rename_img_xml, 'Ctrl+Alt+1','edit')
-        duplicate_xml=action('duplicate_xml', self.make_duplicate_xml,'Ctrl+2', 'copy')
-        batch_duplicate=action('batch_duplicate', self.batch_duplicate_xml,'Ctrl+Alt+2', 'copy')
-        label_pruning=action('label_pruning', self.prune_useless_label,'Ctrl+3', 'delete')
-        file_pruning=action('file_pruning', self.remove_extra_img_xml,'Ctrl+Alt+3', 'delete')
-        change_label=action('change_label', self.change_label_name, 'Ctrl+4','color_line')
-        fix_property=action('fix_property', self.fix_xml_property, 'Ctrl+5','color_line')
-        auto_labeling_one=action('auto_labeling_single_class', self.auto_labeling_one,'Ctrl+6', 'app')
-        auto_labeling_multi=action('auto_labeling_multi_classes', self.auto_labeling_multi,'Ctrl+7', 'app')
+        load_label_names = action('Load Label Names', self.load_label_names, 'Ctrl+0', 'file')
+        label_pruning = action('Label Pruning', self.prune_useless_label, 'Ctrl+3', 'delete')
+        file_pruning = action('File Pruning', self.remove_extra_img_xml, 'Ctrl+Alt+3', 'delete')
+        change_label = action('Change Label', self.change_label_name, 'Ctrl+4', 'color_line')
         choose_autolabel_model = action(
-            u'选择自动标注模型',
+            'Choose Auto-Label Model',
             self.choose_autolabel_model,
             'Ctrl+Shift+M',
             'open',
-            u'为「Auto Label 当前图」(快捷键 Q) 选择或更换 YOLO 权重；之后按 Q 将直接使用此处所选模型。',
+            'Select YOLO weights for Auto Label current image (Q).',
             enabled=True)
-        # data_agument=action('data_agument', self.data_auto_agument,'Ctrl+8', 'copy')
-        
-        make_training_datasets_one = action('make_training_datasets_single-class', self.make_datasets_one,'Ctrl+Alt+8', 'app')
-        make_training_datasets = action('make_training_datasets', self.make_datasets,'Ctrl+8', 'app')
-        training_model = action('training_model', self.training_model,'Ctrl+9', 'app')
-        
-        folder_info=action('folder_info', self.show_folder_infor,'Alt+1', 'help')
-        label_info=action('label_info', self.show_label_info,'Alt+2', 'help')
-        
-        extract_video=action('extract_video', self.extract_video,'Shift+1', 'new')
-        extract_videos=action('extract_videos', self.extract_videos,'Shift+2', 'new')
-        extract_stream=action('extract_stream', self.extract_stream,'Shift+3', 'new')
-        batch_resize_img=action('batch_resize_img', self.batch_resize_img,'Shift+4', 'fit-window')
-        merge_video=action('merge_video', self.merge_video,'Shift+5', 'open')
-        annotation_video=action('annotation_video', self.annotation_video,'Shift+6', 'new')
+        auto_label_batch = action(
+            'Auto Label Batch',
+            self.auto_label_batch,
+            'Ctrl+6',
+            'app',
+            'Batch auto-label a folder to YOLO txt (detect/segment/pose).',
+            enabled=True)
+        make_datasets = action(
+            'Make Datasets',
+            self.make_datasets_unified,
+            'Ctrl+8',
+            'app',
+            'Build train/val YOLO dataset from labeled images.',
+            enabled=True)
+        training_model = action('Train Model', self.training_model, 'Ctrl+9', 'app')
+
+        folder_info = action('Folder Info', self.show_folder_infor, 'Alt+1', 'help')
+        label_info = action('Label Info', self.show_label_info, 'Alt+2', 'help')
+
+        extract_videos = action(
+            'Extract Videos',
+            self.extract_videos,
+            'Shift+1',
+            'new',
+            'Extract frames from one or more videos (multi-select).',
+            enabled=True)
+        extract_stream = action('Extract Stream', self.extract_stream, 'Shift+3', 'new')
+        annotate_videos = action(
+            'Annotate Videos',
+            self.annotate_videos,
+            'Shift+6',
+            'new',
+            'Extract frames and YOLO auto-label to images/ + labels/.',
+            enabled=True)
         
         quit = action(getStr('quit'), self.close,
                       'Ctrl+Q', 'quit', getStr('quitApp'))
@@ -632,10 +657,7 @@ class MainWindow(QMainWindow, WindowMixin):
                          'Ctrl+A', 'hide', getStr('showAllBoxDetail'),
                          enabled=False)
 
-        help = action(getStr('tutorial'), self.showTutorialDialog, None, 'help', getStr('tutorialDetail'))
         showInfo = action(getStr('info'), self.showInfoDialog, None, 'help', getStr('info'))
-        checkUpdateNow = action('Check Updates', self.checkSoftwareUpdateNow, 'Ctrl+Shift+U', 'open', 'Check software update from manifest')
-        setUpdateUrl = action('Set Update URL', self.setUpdateManifestUrl, None, 'edit', 'Configure update manifest URL')
 
         zoom = QWidgetAction(self)
         zoom.setDefaultWidget(self.zoomWidget)
@@ -722,7 +744,7 @@ class MainWindow(QMainWindow, WindowMixin):
                               zoomActions=zoomActions,
                               hideAll=hideAll, showAll=showAll,
                               fileMenuActions=(
-                                  open, opendir, save, saveAs, close, resetAll,quit,duplicate_xml,batch_duplicate,label_pruning,folder_info), #,data_agument
+                                  open, opendir, save, saveAs, close, resetAll, quit, label_pruning, folder_info),
                               beginner=(), advanced=(),
                               editMenu=(edit, copy, delete,
                                         None, color1, self.drawSquaresOption),
@@ -764,16 +786,16 @@ class MainWindow(QMainWindow, WindowMixin):
         self.displayLabelOption.triggered.connect(self.togglePaintLabelsOption)
 
         # 设置菜单栏
-        addActions(self.menus.annotate,(load_label_names, None, batch_rename_img,rename_img_xml,None,
-                    duplicate_xml,batch_duplicate,None,
-                    label_pruning,file_pruning,change_label,fix_property,None,
-                    choose_autolabel_model, None,
-                    auto_labeling_one, auto_labeling_multi,None, make_training_datasets_one, make_training_datasets, training_model, None, #data_agument,None,
-                    folder_info,label_info))
-        addActions(self.menus.video,(extract_video,extract_videos,extract_stream,None,batch_resize_img,merge_video,None,annotation_video))
+        addActions(self.menus.annotate, (
+            load_label_names, None,
+            label_pruning, file_pruning, change_label, None,
+            choose_autolabel_model, auto_label_batch, None,
+            make_datasets, training_model, None,
+            folder_info, label_info))
+        addActions(self.menus.video, (extract_videos, extract_stream, None, annotate_videos))
         addActions(self.menus.file,
                    (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs, close, resetAll, quit))
-        addActions(self.menus.help, (help, showInfo, checkUpdateNow, setUpdateUrl, None, search_system))
+        addActions(self.menus.help, (showInfo,))
         addActions(self.menus.view, (
             self.useMagnifyingLens,
             self.autoSaving,
@@ -1389,7 +1411,6 @@ class MainWindow(QMainWindow, WindowMixin):
     def copyLastLabel(self):
         assert self.beginner()
         print('Copy Last Labels to current image')
-        # def auto_labeling_m(self):
         try:
             if self.lastLabelFile:
                 if self.defaultSaveDir is not None:
@@ -1654,10 +1675,10 @@ class MainWindow(QMainWindow, WindowMixin):
         return picked
 
     def choose_autolabel_model(self):
-        u"""Annotate-Tools「选择自动标注模型」：为快捷键 Q（Auto Label 当前图）指定或更换 YOLO 权重；快捷键 Ctrl+Shift+M。"""
+        """Annotate-Tools: set YOLO weights for Auto Label current image (shortcut Q). Menu shortcut Ctrl+Shift+M."""
         prev = ustr(getattr(self, 'autolabel_weights', '') or '').strip()
-        title = u'Auto Label 模型权重（当前: %s）：' % (
-            os.path.basename(prev) if prev else u'(未设置)')
+        title = 'Auto Label model (current: %s):' % (
+            os.path.basename(prev) if prev else '(not set)')
         wsel = self._select_model_weight(
             title,
             prefer_model=DEFAULT_DETECT_PT,
@@ -1670,12 +1691,167 @@ class MainWindow(QMainWindow, WindowMixin):
         disp = ustr(self.autolabel_weights)
         if len(disp) > 80:
             disp = '…' + disp[-78:]
-        self.statusBar().showMessage(u'Auto Label 已切换模型: %s' % disp, 8000)
+        self.statusBar().showMessage('Auto Label model set: %s' % disp, 8000)
+
+    def auto_label_batch(self):
+        """Annotate-Tools → Auto Label Batch: folder YOLO auto-label (detect/segment/pose)."""
+        from libs.annotate_dialogs import AutoLabelBatchDialog
+        from libs.autolabel_batch import run_autolabel_batch
+        try:
+            img0 = self.img_folder_path or (
+                os.path.dirname(self.filePath) if self.filePath else '')
+            defaults = {
+                'image_dir': img0,
+                'label_dir': self.defaultSaveDir or '',
+                'weights': ustr(getattr(self, 'autolabel_weights', '') or ''),
+                'conf': float(self.autoLabelConf),
+                'pred_iou': float(self.autoLabelPredIou),
+                'dedup_iou': float(self.autoLabelDedupIou),
+            }
+            dlg = AutoLabelBatchDialog(self, defaults)
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            v = dlg.values()
+            if not v['image_dir'] or not os.path.isdir(v['image_dir']):
+                QMessageBox.warning(self, 'Auto Label Batch', 'Images folder is invalid.')
+                return
+            if not v['label_dir']:
+                QMessageBox.warning(self, 'Auto Label Batch', 'Labels output folder is required.')
+                return
+            if not v['weights']:
+                QMessageBox.warning(self, 'Auto Label Batch', 'Model weights are required.')
+                return
+
+            progress = QProgressDialog('Auto labeling…', 'Cancel', 0, 100, self)
+            progress.setWindowTitle('Auto Label Batch')
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+
+            def progress_cb(i, n, name):
+                if n > 0:
+                    progress.setValue(min(100, int(100 * i / max(n, 1))))
+                progress.setLabelText(name or 'Processing…')
+                QCoreApplication.processEvents()
+
+            class_list = list(self.yolo_classes) if self.yolo_classes else None
+            n_img, n_lab, n_obj = run_autolabel_batch(
+                v['image_dir'],
+                v['label_dir'],
+                v['weights'],
+                float(v['conf']),
+                float(v['pred_iou']),
+                float(v['dedup_iou']),
+                app_weights_dir=os.path.join(APP_ROOT, 'weights'),
+                class_list=class_list,
+                task_hint=v['task_hint'],
+                progress_cb=progress_cb,
+                cancel_cb=progress.wasCanceled,
+                save_scores=bool(v.get('save_score', True)),
+            )
+            progress.setValue(100)
+            self.autolabel_weights = v['weights']
+            self.autolabelWeightsUserConfirmed = True
+            self._persist_autolabel_settings()
+            if not self.defaultSaveDir:
+                self.defaultSaveDir = v['label_dir']
+            QMessageBox.information(
+                self, 'Done',
+                'Processed %d images.\nWith labels: %d\nObjects: %d\n\nOutput:\n%s' % (
+                    n_img, n_lab, n_obj, os.path.abspath(v['label_dir'])))
+            if img0 and os.path.abspath(img0) == os.path.abspath(v['image_dir']):
+                self.rebuildFileAnnoMetaCache()
+                self.refreshImg()
+        except Exception:
+            self._report_error('auto_label_batch')
+
+    def _yolo_labels_to_single_class(self, label_dir, class_name):
+        """Remap all YOLO txt class ids to 0 and write classes.txt."""
+        class_name = (class_name or 'object').strip() or 'object'
+        for item in os.listdir(label_dir):
+            if not item.lower().endswith('.txt') or item.lower() == 'classes.txt':
+                continue
+            path = os.path.join(label_dir, item)
+            lines_out = []
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if not parts:
+                        continue
+                    parts[0] = '0'
+                    lines_out.append(' '.join(parts))
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines_out) + ('\n' if lines_out else ''))
+        with open(os.path.join(label_dir, 'classes.txt'), 'w', encoding='utf-8') as f:
+            f.write(class_name + '\n')
+
+    def make_datasets_unified(self):
+        """Annotate-Tools → Make Datasets: train/val split with optional VOC convert & single-class."""
+        from libs.annotate_dialogs import MakeDatasetsDialog
+        from libs.voc_2_yolo import voc2yolo
+        from libs.voc_2_yolo_single import voc2yolo_one
+        from libs.make_train_val_test_datasets import make_train_val
+        try:
+            defaults = {
+                'image_dir': self.img_folder_path or '',
+                'label_dir': self.xml_folder_path or self.defaultSaveDir or '',
+                'output_dir': os.path.join(APP_ROOT, 'datasets'),
+            }
+            dlg = MakeDatasetsDialog(self, defaults)
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            v = dlg.values()
+            image_dr = v['image_dir']
+            label_dr = v['label_dir']
+            path_out = v['output_dir'] or os.path.join(APP_ROOT, 'datasets')
+            if not image_dr or not os.path.isdir(image_dr):
+                QMessageBox.warning(self, 'Make Datasets', 'Images folder is invalid.')
+                return
+            if not label_dr or not os.path.isdir(label_dr):
+                QMessageBox.warning(self, 'Make Datasets', 'Labels folder is invalid.')
+                return
+
+            work_label_dr = label_dr
+            if v['voc']:
+                txt_dr = os.path.join(os.path.dirname(label_dr), 'txts')
+                os.makedirs(txt_dr, exist_ok=True)
+                if v['single_class']:
+                    voc2yolo_one(txt_dr, label_dr)
+                else:
+                    classes_file = v['classes_file']
+                    if not classes_file or not os.path.isfile(classes_file):
+                        classes_file, _ = QFileDialog.getOpenFileName(
+                            self, 'Select classes.txt', APP_ROOT,
+                            'Text (*.txt);;All files (*.*)')
+                    if not classes_file:
+                        return
+                    with open(classes_file, 'r', encoding='utf-8') as f:
+                        classes = [x.strip() for x in f.read().splitlines() if x.strip()]
+                    voc2yolo(txt_dr, label_dr, classes)
+                work_label_dr = txt_dr
+            elif v['single_class']:
+                single_name = v['single_class_name'] or 'object'
+                self._yolo_labels_to_single_class(work_label_dr, single_name)
+
+            make_train_val(image_dr, work_label_dr, path_out, float(v['split']))
+            yaml_name = 'data_one_class.yaml' if v['single_class'] else 'data.yaml'
+            yaml_path = self._write_dataset_yaml(path_out, work_label_dr, yaml_name=yaml_name)
+            tr_i, va_i, tr_l, va_l, out_abs = self._count_make_dataset_outputs(path_out)
+            tot_i, tot_l = tr_i + va_i, tr_l + va_l
+            msg = (
+                'Train/val dataset created.\n\n'
+                'Train: %d images, %d labels\n'
+                'Val: %d images, %d labels\n'
+                'Total: %d images, %d labels\n\n'
+                'classes.txt written under output root, labels/train, labels/val.\n\n'
+                'Output:\n%s\n\nYAML:\n%s'
+            ) % (tr_i, tr_l, va_i, va_l, tot_i, tot_l, out_abs, os.path.abspath(yaml_path))
+            QMessageBox.information(self, 'Done', msg)
+        except Exception:
+            self._report_error('make_datasets_unified')
 
     def autoLabelCurrentImg(self):
         assert self.beginner()
         print('auto label current image')
-        # def auto_labeling_m(self):
         try:
             self.xml_folder_path = self.defaultSaveDir
             source = self.filePath
@@ -3068,29 +3244,19 @@ class MainWindow(QMainWindow, WindowMixin):
         if (not ok):
             return
         action_dict={'load_label_names':self.load_label_names,'c0':self.load_label_names,
-                     'batch_rename_img':self.batch_rename_img,'c1':self.batch_rename_img,
-                     'rename_img_xml':self.rename_img_xml,'ca1':self.rename_img_xml,
-                     'duplicate_xml':self.make_duplicate_xml,'c2':self.make_duplicate_xml,
-                     'batch_duplicate':self.batch_duplicate_xml,'ca2':self.batch_duplicate_xml,
                      'label_pruning':self.prune_useless_label,'c3':self.prune_useless_label,
                      'file_pruning':self.remove_extra_img_xml,'ca3':self.remove_extra_img_xml,
                      'change_label':self.change_label_name,'c4':self.change_label_name,
-                     'fix_property':self.fix_xml_property,'c5':self.fix_xml_property,
                      'choose_autolabel_model':self.choose_autolabel_model,'csm':self.choose_autolabel_model,
-                     'auto_labeling_one':self.auto_labeling_one,'c6':self.auto_labeling_one,
-                     'auto_labeling_multi':self.auto_labeling_multi,'c7':self.auto_labeling_multi,
-                     'make_training_datasets_one':self.make_datasets_one, 'ca8':self.make_datasets_one,
-                     'make_training_datasets':self.make_datasets, 'c8':self.make_datasets,
+                     'auto_label_batch':self.auto_label_batch,'c6':self.auto_label_batch,
+                     'make_datasets':self.make_datasets_unified, 'c8':self.make_datasets_unified,
                      'training_model':self.training_model,'c9':self.training_model,
                      # 'data_agument':self.data_auto_agument,'c8':self.data_auto_agument,
                      'folder_info':self.show_folder_infor,'a1':self.show_folder_infor,
                      'label_info':self.show_label_info,'a2':self.show_label_info,
-                     'extract_video':self.extract_video,'s1':self.extract_video,
-                     'extract_videos':self.extract_videos,'s2':self.extract_videos,
+                     'extract_videos':self.extract_videos,'s1':self.extract_videos,
                      'extract_stream':self.extract_stream,'s3':self.extract_stream,
-                     'batch_resize_img':self.batch_resize_img,'s4':self.batch_resize_img,
-                     'merge_video':self.merge_video,'s5':self.merge_video,
-                     'annotation_video':self.annotation_video,'s65':self.annotation_video,
+                     'annotate_videos':self.annotate_videos,'s6':self.annotate_videos,
                      'Search_System':self.search_actions_info
                      }
         search_key='Search_System' if search_key=='' else search_key
@@ -3942,371 +4108,160 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
     
-    def extract_video(self):
-        """extract imgs from video.
-        'frame gap' means save img by this frequency(not save every img in video if frame_gap larger than 1).
-        img will saved in the same path with video.
-        this action may take some time, please don't click mouse too frequently.
-        """
-        try:
-            video_path,_ = QFileDialog.getOpenFileName(self,'choose video file:')
-            if not video_path:
-                return
-            save_path_root = QFileDialog.getExistingDirectory(self,'choose a directory to save images extracted:', video_path)
-            # print(save_path_root)
-            # print(os.path.splitext(os.path.basename(video_path))[0])
-            if not save_path_root:
-                return
-            # save_path
-            save_path=os.path.join(save_path_root, 'images')
-            # print(save_path)
-            os.makedirs(save_path,exist_ok=True)
-            cap = cv2.VideoCapture(video_path)
-            frame_num =int(cap.get(7))
-            # print(frame_num)
-            frame_gap,ok=QInputDialog.getInt(self, 'Int Input Dialog',
-                "Input frame gap, img will extract by this frequency",value=1)
-            if not ok:
-                return
-            progress = QProgressDialog(self)
-            progress.setWindowTitle("请稍等")  
-            progress.setLabelText("正在提取图像...")
-            progress.setCancelButtonText("取消")
-            # progress.setMinimumDuration(5)
-            # progress.setWindowModality(Qt.WindowModal)
-            progress.setRange(0,100)
-            cap = cv2.VideoCapture(video_path)
-            frame_num =int(cap.get(7))
-            # print(frame_num)
-            # frame_gap,ok=QInpu
-            while cap.isOpened():
-                
-                ret, frame = cap.read()
-                if ret:
-                    index=int(cap.get(1))
-                    if index%frame_gap!=0:
-                        continue
-                    cv2.imwrite(os.path.join(save_path,os.path.splitext(os.path.basename(video_path))[0]+'_%06d'%(int(cap.get(1)))+'.jpg'),frame)
-                    # print(int(index/frame_num*100))
-                    progress.setValue(int(index/frame_num*100))
-                    QCoreApplication.processEvents()
-                    if progress.wasCanceled():
-                        break
-                else:
-                    break
-            cap.release()
-            progress.setValue(100)
-            QMessageBox.information(self,u'Done!',u'video extract done.')
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
+    _VIDEO_FILE_FILTER = (
+        "Video (*.mp4 *.avi *.mov *.mkv *.mpg *.mpeg *.wmv *.m4v *.webm);;All files (*.*)")
+
+    def _pick_video_files(self):
+        start = os.path.dirname(self.filePath) if self.filePath else APP_ROOT
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, 'Select Video File(s)', start, self._VIDEO_FILE_FILTER)
+        return [p for p in paths if p]
 
     def extract_videos(self):
-        """extract imgs from videos.
-        'frame gap' means save img by this frequency(not save every img in video if frame_gap larger than 1).
-        img will saved in the same path with video.
-        this action may take some time, please don't click mouse too frequently.
-        """
+        """Video-Tools: extract frames from one or more videos (multi-select) to output/images/."""
+        from libs.annotate_dialogs import ExtractVideosDialog
+        from libs.video_tools import extract_videos_to_images
         try:
-            video_root = QFileDialog.getExistingDirectory(self,'choose a directory of video:', r'./')
-            if not video_root:
+            paths = self._pick_video_files()
+            if not paths:
                 return
-            save_path_root = QFileDialog.getExistingDirectory(self,'choose a directory to save images extracted:', video_root)
-            # print(save_path_root)
-            # print(os.path.splitext(os.path.basename(video_path))[0])
-            if not save_path_root:
+            default_out = os.path.dirname(paths[0])
+            dlg = ExtractVideosDialog(self, n_videos=len(paths), defaults={'output_dir': default_out})
+            if dlg.exec_() != QDialog.Accepted:
                 return
-            frame_gap,ok=QInputDialog.getInt(self, 'Int Input Dialog',
-                "Input frame gap, img will extract by this frequency",value=10)
-            # save_path 
-            if not ok:
+            v = dlg.values()
+            if not v['output_dir']:
+                QMessageBox.warning(self, 'Extract Videos', 'Output folder is required.')
                 return
-            progress = QProgressDialog(self)
-            progress.setWindowTitle("请稍等")  
-            progress.setLabelText("正在提取图像...")
-            progress.setCancelButtonText("取消")
-            # progress.setMinimumDuration(5)
-            # progress.setWindowModality(Qt.WindowModal)
-            progress.setRange(0,len(os.listdir(video_root)))
-            for i, video in enumerate(os.listdir(video_root)):
-                if ".mp4" in video or '.mpg' in video or '.avi' in video:
-                    nm = video.split("_")[0]
-                    save_path=os.path.join(save_path_root, nm, "images")
-                    video_path = os.path.join(video_root, video)
-                    # print(save_path)
-                    os.makedirs(save_path,exist_ok=True)
-                    cap = cv2.VideoCapture(video_path)
-                    frame_num =int(cap.get(7))
-                    # print(frame_num)
-                    cap = cv2.VideoCapture(video_path)
-                    # frame_num =int(cap.get(7))
-                    progress.setValue(i+1)
-                    if progress.wasCanceled():
-                        break
-                    while cap.isOpened():
-                        
-                        ret, frame = cap.read()
-                        if ret:
-                            index=int(cap.get(1))
-                            if index%frame_gap!=0:
-                                continue
-                            save_name = os.path.splitext(video)[0]
-                            save_name = remove_novel(save_name)+'_%06d'%(int(cap.get(1)))+'.jpg'
-                            cv2.imencode('.jpg', frame)[1].tofile(os.path.join(save_path,save_name))
-                            # cv2.imwrite(os.path.join(save_path,os.path.splitext(video)[0]+str(int(cap.get(1)))+'.jpg'),frame)
-                            QCoreApplication.processEvents()
+            progress = QProgressDialog('Extracting frames…', 'Cancel', 0, 100, self)
+            progress.setWindowTitle('Extract Videos')
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
 
-                        else:
-                            break
-                    cap.release()
-            # progress.setValue(100)
-            QMessageBox.information(self,u'Done!',u'video extract done.')
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
+            def progress_cb(cur, tot, name):
+                if tot > 0:
+                    progress.setValue(min(100, int(100 * cur / tot)))
+                progress.setLabelText(name or 'Processing…')
+                QCoreApplication.processEvents()
+
+            n_vid, n_frames = extract_videos_to_images(
+                paths, v['output_dir'], int(v['frame_gap']),
+                progress_cb=progress_cb, cancel_cb=progress.wasCanceled)
+            progress.setValue(100)
+            QMessageBox.information(
+                self, 'Done',
+                'Videos processed: %d\nFrames saved: %d\n\nImages:\n%s' % (
+                    n_vid, n_frames, os.path.abspath(os.path.join(v['output_dir'], 'images'))))
+        except Exception:
+            self._report_error('extract_videos')
 
     def extract_stream(self):
-        """extract imgs from stream, 'stream_path' usually start with rtsp or rtmp.
-        'frame gap' means save img by this frequency(not save every img in video if frame_gap larger than 1).
-        'max save number' means actions will stop after save this amount imgs.
-        this action will stop after read stream path failed 3 times.
-        this action may take some time, please don't click mouse too frequently.
-        """
+        """Extract frames from RTSP/RTMP stream to a folder (frame gap + max count)."""
         try:
-            stream_path,ok=QInputDialog.getText(self, 'Text Input Dialog', 
-                        "Input steam path(start with rtmp、rtsp...):")
-            if not(stream_path and ok):
+            stream_path, ok = QInputDialog.getText(
+                self, 'Text Input Dialog',
+                "Input steam path(start with rtmp、rtsp...):")
+            if not (stream_path and ok):
                 return
-            save_path = QFileDialog.getExistingDirectory()
+            save_path = QFileDialog.getExistingDirectory(self, 'Choose save folder')
             if not save_path:
                 return
-            frame_gap,ok=QInputDialog.getInt(self, 'Int Input Dialog',
-                "Input frame gap, img will extract by this frequency",value=1)
+            frame_gap, ok = QInputDialog.getInt(
+                self, 'Int Input Dialog',
+                "Input frame gap, img will extract by this frequency", value=1)
             if not ok:
                 return
-            max_frame,ok=QInputDialog.getInt(self, 'Int Input Dialog',
-                "Input max save number, process will end after save cetain number imgs",value=10)
+            max_frame, ok = QInputDialog.getInt(
+                self, 'Int Input Dialog',
+                "Input max save number, process will end after save cetain number imgs", value=10)
             if not ok:
                 return
             cap = cv2.VideoCapture(stream_path)
-            drop_times=0
+            drop_times = 0
             while True:
                 ret, frame = cap.read()
                 if ret:
-                    index=int(cap.get(1))
-                    if index%frame_gap!=0:
+                    index = int(cap.get(1))
+                    if index % frame_gap != 0:
                         continue
-                    if index>(max_frame*frame_gap):
+                    if index > (max_frame * frame_gap):
                         break
-                    cv2.imwrite(save_path+'/'+str(int(cap.get(1)))+'.jpg',frame)
+                    cv2.imwrite(os.path.join(save_path, '%d.jpg' % int(cap.get(1))), frame)
                 else:
                     cap.release()
-                    drop_times+=1
-                    if drop_times>=3:
-                        QMessageBox.information(self,u'Wrong!',u'stream path not useable.')
+                    drop_times += 1
+                    if drop_times >= 3:
+                        QMessageBox.information(self, u'Wrong!', u'stream path not useable.')
                         break
                     cap = cv2.VideoCapture(stream_path)
             cap.release()
-            QMessageBox.information(self,u'Done!',u'stream extract done.')
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
-           
-    def batch_resize_img(self):
-        """input Wdith and Height to resize all img to one shape.
-        """
-        if self.filePath==None:
-            QMessageBox.information(self,u'Wrong!',u'have no loaded folder yet, please check again.')
-            return    
-        try:
-            img_path = os.path.dirname(self.filePath)
-            filelist = natsort.natsorted(os.listdir(img_path))
-            new_W,ok=QInputDialog.getInt(self,'Integer input dialog','input img wdith :',value=1920)
-            if not ok:
-                return
-            new_H,ok=QInputDialog.getInt(self,'Integer input dialog','input img height :',value=1080)
-            if not ok:
-                return
-            for item in filelist:
-                img=cv2.imread(os.path.join(img_path,item))
-                img=cv2.resize(img,(new_W,new_H))
-                cv2.imwrite(os.path.join(img_path,item),img)
-                
-            QMessageBox.information(self,u'Done!',u'batch resize done.')
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
-        
-    def merge_video(self):
-        """merge all img in one path to one video, video will saved in img's parent path.
-        for some restraint, fps must be 25, you can use 'repeat times' to repeat play img if you want slower the video.
-        this action may take some time, please don't click mouse too frequently. 
-        you can press 'space' if you find bounding box not accurate during auto annotate.
-        """
-        try:
-            img_path = QFileDialog.getExistingDirectory(self,'choose imgs folder:')
-            if not img_path:
-                return
-            filelist = natsort.natsorted(os.listdir(img_path)) #获取该目录下的所有文件名
-            img=cv2.imread(img_path+'/'+filelist[0])
-            img_size=img.shape
-            fps = 25
-            repeat_time,ok = QInputDialog.getInt(self, 'Int Input Dialog',
-                        "Input each img's repeat times(the bigger, the slower), usually set 1",value=1)
-            if not ok:
-                return
-            file_path = img_path +'_result' + ".avi" #导出路径
-            fourcc = cv2.VideoWriter_fourcc('P','I','M','1')
-            video = cv2.VideoWriter( file_path, fourcc, fps ,(img_size[1],img_size[0]))
-            for item in filelist:
-                if item.endswith('.jpg'):   #判断图片后缀是否是.png
-                    item = img_path +'/'+item 
-                    img = cv2.imread(item)
-                    for j in range(repeat_time):
-                        video.write(img)        
+            QMessageBox.information(self, u'Done!', u'stream extract done.')
+        except Exception:
+            self._report_error('extract_stream')
 
-            video.release()
-            QMessageBox.information(self,u'Done!',u'video merge done.')
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
-
-    def annotation_video(self):
-        """ auto annotation video file or local camera.
-        select video file, cancle to use local camera.
-        img and xml will saved on dir of video path unless you use local camera, and folder will be './' in which case.
-        'CSRT' type means more accuracy and low speed(recommend), 'MOSSE' means high speed and low accuracy, 'KCF' is in middle.
-        frames are resized for display reason, one better run 'fix_property' after this process.
-        press 'space' to re-drawing bounding box during annotation if you find bounding box not accurate.
-        """
+    def annotate_videos(self):
+        """Video-Tools: extract frames and YOLO auto-label to output/images/ + labels/."""
+        from libs.annotate_dialogs import AnnotateVideosDialog
+        from libs.video_tools import annotate_videos_to_yolo
         try:
-            tree = ET.ElementTree(file='./datasets/origin.xml')
-            root=tree.getroot()
-            for child in root.findall('object'):
-                template_obj=child#保存一个物体的样板
-                root.remove(child)
-            tree.write('./datasets/template.xml')
-            trackerType_selector={'CSRT':cv2.TrackerCSRT_create,
-                                  'BOOSTING':cv2.TrackerBoosting_create,
-                                  'MIL':cv2.TrackerMIL_create,
-                                  'KCF':cv2.TrackerKCF_create,
-                                  'TLD':cv2.TrackerTLD_create,
-                                  'MEDIANFLOW':cv2.TrackerMedianFlow_create,
-                                  'GOTURN':cv2.TrackerGOTURN_create,
-                                  'MOSSE':cv2.TrackerMOSSE_create}
-            items=tuple(trackerType_selector)
-            trackerType , ok = QInputDialog.getItem(self, "Select",
-                "Tracker type, usually 'CSRT' is ok:", items, 0, False)
-            if not ok:
+            paths = self._pick_video_files()
+            if not paths:
                 return
-            videoPath ,_ = QFileDialog.getOpenFileName(self,"choose video file, cancle to use local camera:")
-            if not videoPath:
-                videoPath = 0
-            save_gap,ok=QInputDialog.getInt(self,'Integer input dialog','input save gap, img will saved by this frenquency :',value=25)
-            if not ok:
+            default_out = os.path.dirname(paths[0])
+            defaults = {
+                'output_dir': default_out,
+                'weights': ustr(getattr(self, 'autolabel_weights', '') or ''),
+                'frame_gap': 10,
+                'conf': float(self.autoLabelConf),
+                'pred_iou': float(self.autoLabelPredIou),
+                'dedup_iou': float(self.autoLabelDedupIou),
+            }
+            dlg = AnnotateVideosDialog(self, n_videos=len(paths), defaults=defaults)
+            if dlg.exec_() != QDialog.Accepted:
                 return
-            img_size,ok=QInputDialog.getInt(self,'Integer input dialog','input img size, img resized ti this shape by height:',value=900)
-            if not ok:
+            v = dlg.values()
+            if not v['output_dir']:
+                QMessageBox.warning(self, 'Annotate Videos', 'Output folder is required.')
                 return
-            process_shape=(int(1.777*img_size),int(img_size))
-            cap = cv2.VideoCapture(videoPath)
-            ret, frame = cap.read()
-            height_K=frame.shape[0]/img_size
-            weight_K=frame.shape[1]/(1.777*img_size)
-            if not ret:
-                print('Failed to read video')
-                sys.exit(1)
-            else:
-                pass
-                frame=cv2.resize(frame,process_shape)
-            def init_multiTracker(frame):
-                bboxes = []
-                colors = []
-                labels = []
-                while True:
-                    # 在对象上绘制边界框selectROI的默认行为是从fromCenter设置为false时从中心开始绘制框，可以从左上角开始绘制框
-                    bbox = cv2.selectROI("draw box and press 'SPACE' to affirm, Press 'q' to quit draw box and start tracking-labeling", frame)
-                    if min(bbox[2],bbox[3]) >= 10:
-                        label_name,ok=QInputDialog.getText(self, 'Text Input Dialog', 
-                        "Input label name:")
-                        if not(label_name and ok):
-                            return
-                        labels.append(label_name)
-                        bboxes.append(bbox)
-                        colors.append((random.randint(30, 240), random.randint(30, 240), random.randint(30, 240)))
-                        p1 = (int(bbox[0]), int(bbox[1]))
-                        p2 = (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3]))
-                        cv2.rectangle(frame, p1, p2, [10,250,10], 2, 1)
-                    else:
-                        print("bbox size small than 10, will be abandoned")
-                    k=cv2.waitKey(0)
-                    # print(k)
-                    if k==113:
-                        break
-                print('Selected bounding boxes: {}'.format(bboxes))
-                multiTracker = cv2.MultiTracker_create()
-                # 初始化多跟踪器
-                for bbox in bboxes:
-                    tracker=trackerType_selector[trackerType]()
-                    multiTracker.add(tracker, frame, bbox)    
-                return multiTracker,colors,labels
-            multiTracker,colors,labels=init_multiTracker(frame)
-            cv2.namedWindow('MultiTracker', cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("MultiTracker", process_shape[0], process_shape[1])
-            cv2.moveWindow("MultiTracker", 10, 10)
-            # 处理视频并跟踪对象
-            index=0
-            while cap.isOpened():
-                ret, origin_frame = cap.read()
-                if not ret:
-                    break
-                frame=cv2.resize(origin_frame,process_shape)
-                draw=frame.copy()
-                ret, boxes = multiTracker.update(frame)
-                # 绘制跟踪的对象
-                for i, newbox in enumerate(boxes):
-                    p1 = (int(newbox[0]), int(newbox[1]))
-                    p2 = (int(newbox[0] + newbox[2]), int(newbox[1] + newbox[3]))
-                    cv2.rectangle(draw, p1, p2, colors[i], 2, 1)
-                    info = labels[i]
-                    t_size=cv2.getTextSize(info, cv2.FONT_HERSHEY_TRIPLEX, 0.7 , 1)[0]
-                    cv2.rectangle(draw, p1, (int(newbox[0]) + t_size[0]+3, int(newbox[1]) + t_size[1]+6), colors[i], -1)
-                    cv2.putText(draw, info, (int(newbox[0])+1, int(newbox[1])+t_size[1]+2), cv2.FONT_HERSHEY_TRIPLEX, 0.7, [255,255,255], 1)
-                # show frame
-                cv2.imshow("MultiTracker, press 'SPACE' to redraw box, press 'q' to quit video labeling", draw)
-                # quit on ESC or Q button
-                if index%save_gap==0:
-                    tree = ET.ElementTree(file='./datasets/template.xml')
-                    root=tree.getroot()
-                    for i, newbox in enumerate(boxes):
-                        temp_obj = template_obj
-                        temp_obj.find('name').text=str(labels[i])
-                        temp_obj.find('bndbox').find('xmin').text=str(int(weight_K*newbox[0]))
-                        temp_obj.find('bndbox').find('ymin').text=str(int(height_K*newbox[1]))
-                        temp_obj.find('bndbox').find('xmax').text=str(int(weight_K*newbox[0]+weight_K*newbox[2]))
-                        temp_obj.find('bndbox').find('ymax').text=str(int(height_K*newbox[1]+height_K*newbox[3]))
-                        root.append(deepcopy(temp_obj))       #深度复制
-                    if videoPath==0:
-                        parent_path='./temp'
-                    else:
-                        parent_path=os.path.dirname(videoPath)
-                    os.makedirs(os.path.join(parent_path,'JPEGImages'), exist_ok=True)
-                    os.makedirs(os.path.join(parent_path,'Annotations'), exist_ok=True)
-                    cv2.imwrite(os.path.join(parent_path,'JPEGImages/','{}.jpg'.format(index)),origin_frame)
-                    tree.write(os.path.join(parent_path,'Annotations/','{}.xml'.format(index)))
-                index+=1
-                k=cv2.waitKey(1)
-                if k==32: #press space to reinit box
-                    cv2.destroyAllWindows()
-                    multiTracker,colors,labels=init_multiTracker(frame)
-                    cv2.namedWindow('MultiTracker', cv2.WINDOW_NORMAL)
-                    cv2.resizeWindow("MultiTracker", process_shape[0], process_shape[1])
-                    cv2.moveWindow("MultiTracker", 10, 10)
-                if k== 27 or k == 113: #press q or esc to quit
-                    cap.release()
-                    cv2.destroyAllWindows()
-                    break
-            cap.release()
-            cv2.destroyAllWindows()
-            QMessageBox.information(self,u'Done!',u'video auto annotation done.')
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
-    
+            if not v['weights']:
+                QMessageBox.warning(self, 'Annotate Videos', 'Model weights are required.')
+                return
+            progress = QProgressDialog('Annotating videos…', 'Cancel', 0, 100, self)
+            progress.setWindowTitle('Annotate Videos')
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+
+            def progress_cb(cur, tot, name):
+                if tot > 0:
+                    progress.setValue(min(100, int(100 * cur / tot)))
+                progress.setLabelText(name or 'Processing…')
+                QCoreApplication.processEvents()
+
+            class_list = list(self.yolo_classes) if self.yolo_classes else None
+            n_frames, n_labeled, n_obj = annotate_videos_to_yolo(
+                paths, v['output_dir'], v['weights'], int(v['frame_gap']),
+                float(v['conf']), float(v['pred_iou']), float(v['dedup_iou']),
+                app_weights_dir=os.path.join(APP_ROOT, 'weights'),
+                class_list=class_list,
+                task_hint=v['task_hint'],
+                save_scores=bool(v.get('save_score', True)),
+                progress_cb=progress_cb,
+                cancel_cb=progress.wasCanceled,
+            )
+            progress.setValue(100)
+            self.autolabel_weights = v['weights']
+            self.autolabelWeightsUserConfirmed = True
+            self._persist_autolabel_settings()
+            out = os.path.abspath(v['output_dir'])
+            QMessageBox.information(
+                self, 'Done',
+                'Frames saved: %d\nFrames with labels: %d\nObjects: %d\n\n'
+                'Images: %s\nLabels: %s' % (
+                    n_frames, n_labeled, n_obj,
+                    os.path.join(out, 'images'), os.path.join(out, 'labels')))
+        except Exception:
+            self._report_error('annotate_videos')
+
     def load_label_names(self):
         filename, _ = QFileDialog.getOpenFileName(self,"Choosing class name list file:", r'datasets', "TXT file(*.txt)")
         if not filename:
@@ -4544,442 +4499,6 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
 
-    def auto_labeling_s(self):
-        try:
-            self.xml_folder_path=self.defaultSaveDir
-            tree = ET.ElementTree(file='./datasets/origin.xml')
-            root=tree.getroot()
-            for child in root.findall('object'):
-                template_obj=child#保存一个物体的样板
-                root.remove(child)
-
-            for child_size in root.findall('size'):
-                template_size = child_size
-                root.remove(child_size)
-                
-            tree.write('./datasets/template.xml')
-                
-            #=====def some function=====
-            def change_size_property(shape_img,template_obj):
-                temp_size=template_size
-                for child in temp_size:
-                    key=child.tag
-                    if key == 'width':
-                        child.text=str(shape_img[1])
-                    if key == 'height':
-                        child.text=str(shape_img[0])
-                    if key == 'depth':
-                        child.text=str(shape_img[2])                    
-                
-                return temp_size
-            
-            def change_obj_property(detect_result,template_obj):
-                temp_obj=template_obj
-                for child in temp_obj:
-                    key=child.tag
-                    if key in detect_result.keys():
-                        child.text=detect_result[key]
-                    if key=='bndbox':
-                        for gchild in child:
-                            gkey=gchild.tag
-                            gchild.text=str(detect_result[gkey])
-                return temp_obj
-                
-            def change_result_type(boxes,scores,labels, needed_labels, conf_thres):
-                result=[]
-                for box, score, label in zip(boxes, scores, labels):
-                    if score>conf_thres and label in needed_labels:
-                        # print(label)
-                        try:
-                            new_obj={}
-                            new_obj['name']=self.default_label
-                            new_obj['xmin']=int(box[0])
-                            new_obj['ymin']=int(box[1])
-                            new_obj['xmax']=int(box[2])
-                            new_obj['ymax']=int(box[3])
-                            result.append(new_obj)
-                        except:
-                            print('labels_info have no label: '+str(label))
-                            pass
-                return result
-
-            source=os.path.dirname(self.filePath)
-            check_chinese(source)
-            xml_path=self.defaultSaveDir
-            
-            weights = self._select_model_weight(
-                "Model weight for auto-labeling single class (default %s):" % DEFAULT_DETECT_PT,
-                prefer_model=DEFAULT_DETECT_PT,
-                for_autolabel=True)
-            if not weights:
-                return
-            # conf_thres = 0.25
-            conf_thres, ok = QInputDialog.getDouble(self,'threshold dialog','input confidence threshold:', value=0.2, min=0.05, max=1.0)
-            if not ok:
-                return
-            iou_thres=0.8
-            # Select GPUs/CPU
-            if torch.cuda.is_available():
-                if torch.cuda.device_count() > 1:
-                    gpuid, _, _ = get_cuda_setup(24,24)
-                    # print(torch.cuda.get_device_capability('cuda:2'))
-                    device = torch.device("cuda:%d"%gpuid)
-                    print(torch.cuda.device_count())
-                else:
-                    device = torch.device("cuda:0")
-            else:
-                device = torch.device("cpu")         
-            # half = device.type != 'cpu'  # half precision only supported on CUDA
-
-            # Load model and label name.
-            w = resolve_yolo_checkpoint(weights, os.path.join(APP_ROOT, 'weights'))
-            model = YOLO(w)  # load FP32 model
-            names = model.model.names
-            # names = model.module.names if hasattr(model, 'module') else model.names
-            # print('ok 1')
-            if len(names)== 1:
-                needed_labels=list(names.values())
-            else:
-                needed_labels=easygui.multchoicebox(msg="select labels you want auto-labeling?",title="Select labels", choices=list(names.values()))
-            new_label, ok = QInputDialog.getText(self,'Label dialog','input new label name for assignment:', text = self.default_label)
-            print("needed names:", needed_labels)
-            if ok:
-                self.default_label = new_label
-            print("new_label:", self.default_label)
-            dataset = LoadImages(source)
-            progress = QProgressDialog(self)
-            progress.setWindowTitle(u"Waiting")  
-            progress.setLabelText(u"auto-labeling now,Please wait...")
-            progress.setCancelButtonText(u"Cancle it")
-            progress.setMinimumDuration(1)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setRange(0,100)   
-            # print('ok 4')
-            index = -1
-            # print('ok 5')
-            for path, img, _, _ in dataset:
-                index += 1
-                # print(path[0])
-                progress.setValue(int(100*index/len(dataset)))
-                if progress.wasCanceled():
-                    QMessageBox.warning(self,"Attention","auto-labeling canceled！") 
-                    return
-                try:
-                    result = model.predict(source=img, conf=conf_thres, iou=iou_thres)[0]
-                    # names = model.model.names
-                    t2 = time_sync()
-                    dets = result.boxes
-
-                    labels = [names[int(x)] for x in dets.cls]
-                    scores = [float(x) for x in dets.conf]
-                    boxes = [x.tolist() for x in dets.xyxy]
-                    tree = ET.ElementTree(file='./datasets/template.xml')
-                    root = tree.getroot()
-                    path_img = path[0]
-                    common_property={'filename':path[0].split('\\')[-1],'path':source,'folder':'images'}
-                    # print('ok 7')
-                    for child in root:
-                        key=child.tag
-                        if key in common_property.keys():
-                            child.text=common_property[key]
-                    # print('ok 8')
-                    new_size = change_size_property(img[0].shape,template_obj)
-                    root.append(new_size)
-    
-                    result = change_result_type(boxes,scores,labels,needed_labels,conf_thres)
-                    # print('ok 9')
-                    if len(result)>0:
-                        for j in range(len(result)):
-                            new_obj = change_obj_property(result[j],template_obj)
-                            root.append(deepcopy(new_obj))       #深度复制
-                            #!!!这块没直接append(new_obj)是因为当增加多个节点的话，new_obj会进行覆盖，必须要用深度复制以进行区分
-                    # print('ok 10')
-                    # print(self.filePath)
-                    if not self.xml_folder_path:
-                        self.xml_folder_path = os.path.join(os.path.dirname(os.path.dirname(self.filePath)), 'xml')
-                    # print(xml_path)
-                    if not os.path.exists(self.xml_folder_path):
-                        os.makedirs(self.xml_folder_path)
-                    # print(xml_path)
-                    # print(path)
-                    path_write = os.path.join(self.xml_folder_path, path_img[len(os.path.dirname(path_img))+1:-4]+'.xml') #path[0:-4] + '.xml'#
-                    # print(path_write)
-                    tree.write(path_write)
-                except Exception as e:
-                    print(e)
-                    continue
-                # print('ok 11')
-            progress.setValue(100)
-            self.refreshImg()
-            QMessageBox.information(self,u'Done!',u'auto labeling done,and reload img folder')  
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))        
-
-    def auto_labeling_m(self):
-        try:
-            self.xml_folder_path = self.defaultSaveDir
-            tree = ET.ElementTree(file='./datasets/origin.xml')
-            root = tree.getroot()
-            for child in root.findall('object'):
-                template_obj = child  # 保存一个物体的样板
-                root.remove(child)
-
-            for child_size in root.findall('size'):
-                template_size = child_size
-                root.remove(child_size)
-
-            tree.write('./datasets/template.xml')
-
-            # =====def some function=====
-            def change_size_property(shape_img, template_obj):
-                temp_size = template_size
-                for child in temp_size:
-                    key = child.tag
-                    if key == 'width':
-                        child.text = str(shape_img[1])
-                    if key == 'height':
-                        child.text = str(shape_img[0])
-                    if key == 'depth':
-                        child.text = str(shape_img[2])
-
-                return temp_size
-
-            def change_obj_property(detect_result, template_obj):
-                temp_obj = template_obj
-                for child in temp_obj:
-                    key = child.tag
-                    if key in detect_result.keys():
-                        child.text = detect_result[key]
-                    if key == 'bndbox':
-                        for gchild in child:
-                            gkey = gchild.tag
-                            gchild.text = str(detect_result[gkey])
-                return temp_obj
-
-            def change_result_type(boxes,scores,labels, needed_labels):
-                result=[]
-                i = 0
-                for box, score, label in zip(boxes, scores, labels):
-                    i+=1
-                    overlay = False
-                    if label in needed_labels:
-                        print(label)
-                        for b in boxes[i:]:
-                            if compute_IOU(box,b) > 0.75:
-                                overlay=True
-                        if not overlay:
-                            try:
-                                new_obj={}
-                                new_obj['name']=label
-                                new_obj['xmin']=int(box[0])
-                                new_obj['ymin']=int(box[1])
-                                new_obj['xmax']=int(box[2])
-                                new_obj['ymax']=int(box[3])
-                                result.append(new_obj)
-                            except:
-                                print('labels_info have no label: '+str(label))
-                                pass
-                return result
-
-            source = os.path.dirname(self.filePath)
-            xml_path = self.defaultSaveDir
-
-            weights = self._select_model_weight(
-                "Model weight for auto-labeling multi class (default %s):" % DEFAULT_DETECT_PT,
-                prefer_model=DEFAULT_DETECT_PT,
-                for_autolabel=True)
-            if not weights:
-                return
-            # conf_thres = 0.25
-            conf_thres, ok = QInputDialog.getDouble(self,'threshold dialog','input confidence threshold:', value=0.2, min=0.05, max=1.0)
-            if not ok:
-                return
-            iou_thres=0.5
-            # iou_thres=0.5
-            # Select GPUs/CPU
-            if torch.cuda.is_available():
-                if torch.cuda.device_count() > 1:
-                    gpuid, _, _ = get_cuda_setup(24,24)
-                    # print(torch.cuda.get_device_capability('cuda:2'))
-                    device = torch.device("cuda:%d"%gpuid)
-                    print(torch.cuda.device_count())
-                else:
-                    device = torch.device("cuda:0")
-            else:
-                device = torch.device("cpu")  
-
-            # Load model and label name.
-            w = resolve_yolo_checkpoint(weights, os.path.join(APP_ROOT, 'weights'))
-            model = YOLO(w)  # load FP32 model
-            names = model.module.names if hasattr(model, 'module') else model.names
-            # print('ok 1')
-            if len(names) == 1:
-                needed_labels = list(names.values())
-            else:
-                needed_labels = easygui.multchoicebox(msg="select labels you want auto-labeling?",
-                                                      title="Select labels", choices=list(names.values()))
-            # new_label, ok = QInputDialog.getText(self, 'Label dialog', 'input new label name for assignment:',
-            #                                      text=self.default_label)
-            # if ok:
-            #     self.default_label = new_label
-            if not needed_labels:
-                return
-            print(needed_labels)
-            # if half:
-            #model.half()  # to FP16
-            check_chinese(source)
-            dataset = LoadImages(source)
-            progress = QProgressDialog(self)
-            progress.setWindowTitle(u"Waiting")
-            progress.setLabelText(u"auto-labeling now,Please wait...")
-            progress.setCancelButtonText(u"Cancle it")
-            progress.setMinimumDuration(1)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setRange(0, 100)
-            # print('ok 4')
-            index = -1
-            # print('ok 5')
-            for path, img, _, _ in dataset:
-                index += 1
-                print(path[0])
-                progress.setValue(int(100 * index / len(dataset)))
-                if progress.wasCanceled():
-                    QMessageBox.warning(self, "Attention", "auto-labeling canceled！")
-                    return
-                if img:
-                    result = model.predict(source=img, conf=conf_thres, iou=iou_thres)[0]
-                    names = model.model.names
-                    t2 = time_sync()
-                    dets = result.boxes
-                    labels = [names[int(x)] for x in dets.cls]
-                    print(labels)
-                    scores = [float(x) for x in dets.conf]
-                    boxes = [x.tolist() for x in dets.xyxy]
-                    
-                    tree = ET.ElementTree(file='./datasets/template.xml')
-                    root = tree.getroot()
-                    path_img=path[0]
-                    common_property = {'filename': path_img.split('\\')[-1], 'path': source, 'folder': 'images'}
-                    # print('ok 7')
-                    for child in root:
-                        key = child.tag
-                        if key in common_property.keys():
-                            child.text = common_property[key]
-                    # print('ok 8')
-                    new_size = change_size_property(img[0].shape, template_obj)
-                    root.append(new_size)
-    
-                    result = change_result_type(boxes, scores, labels, needed_labels)
-                    print(len(result))
-                    if len(result) > 0:
-                        for j in range(len(result)):
-                            new_obj = change_obj_property(result[j], template_obj)
-                            root.append(deepcopy(new_obj))  # 深度复制
-                            # !!!这块没直接append(new_obj)是因为当增加多个节点的话，new_obj会进行覆盖，必须要用深度复制以进行区分
-                    # print('ok 10')
-                    # print(self.filePath)
-                    if not self.xml_folder_path:
-                        self.xml_folder_path = os.path.join(os.path.dirname(os.path.dirname(self.filePath)), 'xmls')
-                    # print(xml_path)
-                    if not os.path.exists(self.xml_folder_path):
-                        os.makedirs(self.xml_folder_path)
-                    # print(xml_path)
-                    # print(path)
-                    path_write = os.path.join(self.xml_folder_path,
-                                              path_img[len(os.path.dirname(path_img)) + 1:-4] + '.xml')  # path[0:-4] + '.xml'#
-                    # print(path_write)
-                    tree.write(path_write)
-                # print('ok 11')
-            progress.setValue(100)
-            self.refreshImg()
-            QMessageBox.information(self, u'Done!', u'auto labeling done,and reload img folder')
-        except Exception as e:
-            QMessageBox.information(self, u'Sorry!', u'something is wrong. ({})'.format(print_error()))
-
-
-    def auto_labeling_one(self):
-
-        if self.filePath==None:
-            QMessageBox.information(self,u'Wrong!',u'have no loaded folder yet, please check again.')
-            return
-        try:       
-            #=====choose model and input label name=====
-            with torch.no_grad():
-                self.auto_labeling_s()
-            return
- 
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
-
-    def auto_labeling_multi(self):
-
-        if self.filePath==None:
-            QMessageBox.information(self,u'Wrong!',u'have no loaded folder yet, please check again.')
-            return
-        try:       
-            #=====choose model and input label name=====
-            with torch.no_grad():
-                self.auto_labeling_m()
-            return
- 
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
-
-    def make_datasets_one(self):
-        from libs.voc_2_yolo_single import voc2yolo_one
-        from libs.make_train_val_test_datasets import make_train_val
-        path_out = r'datasets/one_class'
-        try:
-            image_dr = QFileDialog.getExistingDirectory(self,"Choosing labeled images folder:",self.img_folder_path)
-            if not image_dr:
-                return
-            label_dr = QFileDialog.getExistingDirectory(self,"Choosing label files folder:",self.xml_folder_path)
-            print('image dir:%s'%image_dr)
-            print('label dir:%s'%label_dr)
-            if not label_dr:
-                return
-            data_dr = QFileDialog.getExistingDirectory(self,"Choosing datasets folder:", 'datasets')
-            if data_dr:
-                path_out = data_dr
-            
-            label_format_list = ['VOC(xml)', 'YOLO(txt)']
-            items = tuple(label_format_list)
-
-            label_format, ok = QInputDialog.getItem(self, "Select",
-            "label file's format(VOC or YOLO)':", items, 0, False)
-            if not ok:
-                return
-            if 'VOC' in label_format:
-                txt_dr = os.path.join(os.path.dirname(label_dr), 'txts')
-                # print(txt_dr)
-                # filename = QFileDialog.getOpenFileName(self,"Choosing class name list file:", r'datasets')
-                # if not filename:
-                #     return
-                
-                # f = open(filename, 'r') 
-                # classes = f.readlines()                 
-                # f.close()
-                # print('load class names: ', len(classes)) 
-                voc2yolo_one(txt_dr, label_dr)
-                label_dr = txt_dr
-            print('VOC label files converted to yolo format')
-            make_train_val(image_dr, label_dr, path_out, 0.7)
-            yaml_path = self._write_dataset_yaml(path_out, label_dr, yaml_name='data_one_class.yaml')
-            tr_i, va_i, tr_l, va_l, out_abs = self._count_make_dataset_outputs(path_out)
-            tot_i, tot_l = tr_i + va_i, tr_l + va_l
-            msg = (
-                u'训练/验证集已生成（单类流程）。\n\n'
-                u'训练集：图片 %d 张，YOLO 标注 %d 个\n'
-                u'验证集：图片 %d 张，YOLO 标注 %d 个\n'
-                u'合计：图片 %d 张，标注 %d 个\n\n'
-                u'已写入 classes.txt：输出根目录、labels/train、labels/val（与 data.yaml 中 names 一致）。\n\n'
-                u'输出目录：\n%s\n\n'
-                u'YAML：\n%s'
-            ) % (tr_i, tr_l, va_i, va_l, tot_i, tot_l, out_abs, os.path.abspath(yaml_path))
-            QMessageBox.information(self, u'Done!', msg)
-                         
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
 
     def _infer_dataset_names(self, label_dir):
         classes_path = os.path.join(label_dir, 'classes.txt')
@@ -5316,90 +4835,44 @@ class MainWindow(QMainWindow, WindowMixin):
         tr_l, va_l = count_lbl('train'), count_lbl('val')
         return tr_i, va_i, tr_l, va_l, root
 
-    def make_datasets(self):
-        from libs.voc_2_yolo import voc2yolo
-        from libs.make_train_val_test_datasets import make_train_val
-        path_out = r'datasets'
-        try:
-            image_dr = QFileDialog.getExistingDirectory(self,"Choosing labeled images folder:", self.img_folder_path)
-            if not image_dr:
-                return
-            label_dr = QFileDialog.getExistingDirectory(self,"Choosing label files folder:",self.xml_folder_path)
-            print('image dir:%s'%image_dr)
-            print('label dir:%s'%label_dr)
-            if not label_dr:
-                return
-            data_dr = QFileDialog.getExistingDirectory(self,"Choosing datasets folder:", 'datasets')
-            if data_dr:
-                path_out = data_dr
-            
-            label_format_list = ['VOC(xml)', 'YOLO(txt)']
-            items = tuple(label_format_list)
-
-            label_format, ok = QInputDialog.getItem(self, "Select",
-            "label file's format(VOC or YOLO)':", items, 0, False)
-            if not ok:
-                return
-            if 'VOC' in label_format:
-                txt_dr = os.path.join(os.path.dirname(label_dr), 'txts')
-                # print(txt_dr)
-                filename, _ = QFileDialog.getOpenFileName(self,"Choosing class name list file:", r'datasets',"TXT file(*.txt)")
-                if not filename:
-                    return
-                f = open(filename, 'r', encoding='utf-8')
-                classes = f.read().splitlines()
-                # print(classes)
-                f.close()
-                # f = open(filename, 'r')
-                # classes = f.readlines()
-                # f.close()
-                print('load class names: ', len(classes)) 
-                voc2yolo(txt_dr, label_dr, classes)
-                label_dr = txt_dr
-            print('VOC label files converted to yolo format')
-            make_train_val(image_dr, label_dr, path_out, 0.7)
-            yaml_path = self._write_dataset_yaml(path_out, label_dr, yaml_name='data.yaml')
-            tr_i, va_i, tr_l, va_l, out_abs = self._count_make_dataset_outputs(path_out)
-            tot_i, tot_l = tr_i + va_i, tr_l + va_l
-            msg = (
-                u'训练/验证集已生成。\n\n'
-                u'训练集：图片 %d 张，YOLO 标注 %d 个\n'
-                u'验证集：图片 %d 张，YOLO 标注 %d 个\n'
-                u'合计：图片 %d 张，标注 %d 个\n\n'
-                u'已写入 classes.txt：输出根目录、labels/train、labels/val（与 data.yaml 中 names 一致）。\n\n'
-                u'输出目录：\n%s\n\n'
-                u'YAML：\n%s'
-            ) % (tr_i, tr_l, va_i, va_l, tot_i, tot_l, out_abs, os.path.abspath(yaml_path))
-            QMessageBox.information(self, u'Done!', msg)
-                         
-        except Exception as e:
-            QMessageBox.information(self,u'Sorry!',u'something is wrong. ({})'.format(print_error()))
     
     def training_model(self):
         try:
-            weights = self._select_model_weight(
-                "Training base model (default %s, supports legacy .pt/.pth/.h5):" % DEFAULT_DETECT_PT,
-                prefer_model=DEFAULT_DETECT_PT)
-            if not weights:
-                return
-            weights = resolve_yolo_checkpoint(weights, os.path.join(APP_ROOT, 'weights'))
-            self.weights = weights
+            from libs.train_dialog import TrainModelDialog, save_train_dialog_values
 
-            start_yaml_dir = os.path.join(APP_ROOT, 'datasets')
-            if not os.path.isdir(start_yaml_dir):
-                start_yaml_dir = APP_ROOT
-            yaml_file, _ = QFileDialog.getOpenFileName(
+            wdir = os.path.join(APP_ROOT, 'weights')
+
+            def _estimate_batch(w_raw: str, imgsz: int) -> int:
+                wr = resolve_yolo_checkpoint(w_raw.strip(), wdir)
+                if os.path.isfile(wr):
+                    fsize = max(1, int(os.path.getsize(wr) / (1024 * 1024)))
+                    _, free_mem, _ = get_cuda_setup(24, 24)
+                    return int(free_mem / (fsize * imgsz * imgsz / (1000 * 35)))
+                _, free_mem, _ = get_cuda_setup(24, 24)
+                return max(1, int(free_mem / (imgsz * imgsz / 35)))
+
+            dlg_defaults = {}
+            aw = ustr(getattr(self, 'autolabel_weights', '') or '').strip()
+            if aw:
+                dlg_defaults['weights_file'] = aw
+            dlg = TrainModelDialog(
                 self,
-                "Choose data yaml file:",
-                start_yaml_dir,
-                "YAML file (*.yaml *.yml);;All files (*.*)")
-            if not yaml_file:
+                defaults=dlg_defaults,
+                app_weights_dir=wdir,
+                estimate_batch_fn=_estimate_batch,
+            )
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            v = dlg.values()
+            yaml_file = v.get('yaml_file', '').strip()
+            weights = v.get('weights_file', '').strip()
+            if not yaml_file or not weights:
+                QMessageBox.warning(self, u'Training', u'请选择 data yaml 与预训练权重。')
                 return
             if not (yaml_file.endswith('.yaml') or yaml_file.endswith('.yml')):
                 QMessageBox.information(self, u'Wrong!', u'data file must end with .yaml or .yml')
                 return
-            yaml = yaml_file
-            self.yaml = self._normalize_yaml_for_training(yaml)
+            self.yaml = self._normalize_yaml_for_training(yaml_file)
             print(self.yaml)
             if not os.path.isfile(self.yaml):
                 QMessageBox.warning(self, u'Training', u'找不到 yaml 文件：\n%s' % self.yaml)
@@ -5409,45 +4882,35 @@ class MainWindow(QMainWindow, WindowMixin):
                 QMessageBox.warning(self, u'Training data', vmsg)
                 return
 
-            imgsz,OK=QInputDialog.getInt(self,'Image size','input img size:',value=1280)
-            if not OK:
-                return
-        #%% calculation of max batchsize
-            # weights = r"C:\Users\brigc\Documents\Python\Pytorch\ObjectiveDetection\Auto_Label_Tool\weights\fish_single_s_20230701.pt"
-            # imgsz=1280
+            weights = resolve_yolo_checkpoint(weights, wdir)
+            self.weights = weights
+            save_train_dialog_values(v)
+
+            imgsz = int(v['imgsz'])
+            bsize = int(v['batch'])
+            n_epochs = int(v['epochs'])
+            optimizer = 'SGD'
+            lr0 = 0.001
             try:
-                if os.path.exists(weights):
-                    fsize = int(os.path.getsize(weights) / (1024 * 1024))
+                if os.path.isfile(weights):
+                    fsize = max(1, int(os.path.getsize(weights) / (1024 * 1024)))
                     _, free_mem, _ = get_cuda_setup(24, 24)
                     max_bsize = int(free_mem / (fsize * imgsz * imgsz / (1000 * 35)))
                     print(fsize, free_mem, max_bsize)
                 else:
-                    # Builtin model id (e.g. yolo26n.pt) may not exist as a local file yet.
-                    # Use a conservative default max batch size and let Ultralytics handle download/load.
                     _, free_mem, _ = get_cuda_setup(24, 24)
                     max_bsize = max(1, int(free_mem / (imgsz * imgsz / 35)))
                     print('using builtin model id:', weights, 'estimated max batchsize:', max_bsize)
             except Exception:
-                print('weight file is not right or broken')
+                QMessageBox.warning(self, u'Training', u'无法估算 batch 上限，请检查权重与 GPU。')
                 return
-         #%% set hyper parameters
-            # set batchsize
-            bsize, OK = QInputDialog.getInt(self,'Batch size','dont over max batchsize:%d'%max_bsize, value=8)
-            if not OK:
-                return
-            print('Batch size:%d'%bsize)
-            # if bszie > max_bsize:
-            #     QMessageBox.information(self,u'batch size is over the capacity of GPU right now')
-            #     bsize, OK = QInputDialog.getInt(self,'Batch size','dont over max batchsize:%d'%max_bsize,value=8)
-            #     if not OK:
-            #         return
-            # set epochs
-            n_epochs, OK=QInputDialog.getInt(self,'Epochs','input epochs:',value=100)
-
-            if not OK:
-                return
-            optimizer = 'SGD'
-            lr0 = 0.001
+            if bsize > 0 and bsize > max_bsize:
+                r = QMessageBox.question(
+                    self, u'Training',
+                    u'当前 batch=%d 超过估算安全上限≈%d，可能 OOM。是否继续？' % (bsize, max_bsize),
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if r != QMessageBox.Yes:
+                    return
 
             print('epochs:%d'%n_epochs, 'lr0:%f'%lr0, 'optimizer:%s'%optimizer)
             self.progress = QProgressDialog(self)
@@ -5471,12 +4934,17 @@ class MainWindow(QMainWindow, WindowMixin):
                                 os.remove(os.path.join(walk_root, fl))
                             except Exception:
                                 pass
-            training = train_one(data=self.yaml,
-                                 imgsz=imgsz,bsize=bsize, 
-                                 epochs=n_epochs,
-                                 weights=self.weights,
-                                 optimizer=optimizer,
-                                 lr0=lr0)
+            training = train_one(
+                data=self.yaml,
+                imgsz=imgsz,
+                bsize=bsize,
+                epochs=n_epochs,
+                weights=self.weights,
+                optimizer=optimizer,
+                lr0=lr0,
+                name=v.get('run_name') or '',
+                task=v.get('task') or 'detect',
+            )
             training.str_signal.connect(self.train_info)
             training.start()
             QCoreApplication.processEvents()
@@ -5884,16 +5352,23 @@ def get_main_app(argv=[]):
     Standard boilerplate Qt application code.
     Do everything but app.exec_() -- so that we can test the application in one thread
     """
+    from libs.win_qt_taskbar import load_brand_qicon, set_windows_app_user_model_id
+
+    set_windows_app_user_model_id('Brigchen.AutoLabelTool.ALT.1')
     app = QApplication(argv)
     app.setApplicationName(__appname__)
-    app.setWindowIcon(newIcon("app"))
-    
+    icon = load_brand_qicon(APP_ROOT, 'app')
+    if icon.isNull():
+        icon = newIcon('app')
+    app.setWindowIcon(icon)
+
     # Usage : ALT.py image predefClassFile saveDir
     win = MainWindow(argv[1] if len(argv) >= 2 else None,
                      argv[2] if len(argv) >= 3 else os.path.join(
                          os.path.dirname(sys.argv[0]),
                          'datasets', 'predefined_classes.txt'),
                      argv[3] if len(argv) >= 4 else None) #os.path.join(os.path.dirname(sys.argv[0]), 'data', 'xml'))
+    win.setWindowIcon(icon)
     win.show()
     return app, win
 

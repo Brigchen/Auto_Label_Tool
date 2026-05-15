@@ -35,7 +35,7 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from libs.fish_enhance import gc_enhance_new
 from libs.pkg_paths import resolve_cjk_plot_font
-from libs.repo_paths import configs_dir
+from libs.repo_paths import configs_dir, repo_root
 # import imageio as iio
 import random
 import numpy as np
@@ -422,7 +422,8 @@ class MainWindow(QMainWindow):
         # 设置窗口标题和图标
         # print('306: init ui')
         self.setWindowTitle('Fish Video Detection')
-        self.setWindowIcon(QIcon(r'resources/icons/fishvision_v2_s.png'))
+        fv_icon = os.path.join(repo_root(), 'resources', 'icons', 'fishvision_v2_s.png')
+        self.setWindowIcon(QIcon(fv_icon))
 
         # self.setStyleSheet(qdarkstyle.load_stylesheet(qt_api='pyqt5', palette=LightPalette()))
         self.setFont(QFont("Microsoft YaHei", 9))
@@ -979,9 +980,17 @@ class DetectionDialog(QDialog):
     #     self.move(main_window_x + 500, main_window_y)
 #%%
 if __name__ == '__main__':
+    from libs.win_qt_taskbar import load_brand_qicon, set_windows_app_user_model_id
+
+    set_windows_app_user_model_id('Brigchen.AutoLabelTool.FishVision.1')
     app = QApplication(sys.argv)
-    # print('746: -->')
+    _root = repo_root()
+    _icon = load_brand_qicon(_root, 'fishvision_v2_s')
+    if _icon.isNull():
+        _icon = QIcon(os.path.join(_root, 'resources', 'icons', 'fishvision_v2_s.png'))
+    app.setWindowIcon(_icon)
     main_window = MainWindow()
+    main_window.setWindowIcon(_icon)
     print("748 -->")
     main_window.show()
     print('750 -->')

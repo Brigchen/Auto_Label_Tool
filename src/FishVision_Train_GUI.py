@@ -313,6 +313,14 @@ class FVTGui(QWidget):
         self.close()
 
 if __name__ == '__main__':
+    from libs.win_qt_taskbar import load_brand_qicon, set_windows_app_user_model_id
+
+    set_windows_app_user_model_id('Brigchen.AutoLabelTool.FishVisionTrain.1')
     app = QApplication(sys.argv)
+    _icon = load_brand_qicon(repo_root(), 'app')
+    if not _icon.isNull():
+        app.setWindowIcon(_icon)
     ex = FVTGui()
+    if not _icon.isNull():
+        ex.setWindowIcon(_icon)
     sys.exit(app.exec_())
