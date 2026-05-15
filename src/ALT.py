@@ -302,6 +302,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.settings[SETTING_AUTOLABEL_PRED_IOU] = float(getattr(self, 'autoLabelPredIou', 0.5))
             self.settings[SETTING_AUTOLABEL_DUP_IOU] = float(getattr(self, 'autoLabelDedupIou', 0.7))
             self.settings[SETTING_AUTOLABEL_SETUP_DONE] = bool(getattr(self, 'autoLabelSetupDone', False))
+            self.settings[SETTING_AUTOLABEL_WEIGHTS_CONFIRMED] = bool(
+                getattr(self, 'autolabelWeightsUserConfirmed', False))
             self.settings.save()
         except Exception as e:
             print('[ALT][WARN] persist autolabel settings:', e)
@@ -359,6 +361,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.autoLabelConf = 0.25
         self.autoLabelPredIou = 0.5
         self.autoLabelSetupDone = False
+        self.autolabelWeightsUserConfirmed = False
 
         # Main widgets and related state.
         self.labelDialog = LabelDialog(parent=self, listItem=self.predefined_classes)
@@ -536,6 +539,13 @@ class MainWindow(QMainWindow, WindowMixin):
         fix_property=action('fix_property', self.fix_xml_property, 'Ctrl+5','color_line')
         auto_labeling_one=action('auto_labeling_single_class', self.auto_labeling_one,'Ctrl+6', 'app')
         auto_labeling_multi=action('auto_labeling_multi_classes', self.auto_labeling_multi,'Ctrl+7', 'app')
+        choose_autolabel_model = action(
+            u'选择自动标注模型',
+            self.choose_autolabel_model,
+            'Ctrl+Shift+M',
+            'open',
+            u'为「Auto Label 当前图」(快捷键 Q) 选择或更换 YOLO 权重；之后按 Q 将直接使用此处所选模型。',
+            enabled=True)
         # data_agument=action('data_agument', self.data_auto_agument,'Ctrl+8', 'copy')
         
         make_training_datasets_one = action('make_training_datasets_single-class', self.make_datasets_one,'Ctrl+Alt+8', 'app')
@@ -757,6 +767,7 @@ class MainWindow(QMainWindow, WindowMixin):
         addActions(self.menus.annotate,(load_label_names, None, batch_rename_img,rename_img_xml,None,
                     duplicate_xml,batch_duplicate,None,
                     label_pruning,file_pruning,change_label,fix_property,None,
+                    choose_autolabel_model, None,
                     auto_labeling_one, auto_labeling_multi,None, make_training_datasets_one, make_training_datasets, training_model, None, #data_agument,None,
                     folder_info,label_info))
         addActions(self.menus.video,(extract_video,extract_videos,extract_stream,None,batch_resize_img,merge_video,None,annotation_video))
@@ -857,6 +868,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self.autolabel_weights = sw
         if self.autoLabelSetupDone and not MainWindow._autolabel_weights_usable(self.autolabel_weights):
             self.autoLabelSetupDone = False
+        # Old ALT_Settings.pkl had no key => False => user must pick weights in UI at least once.
+        self.autolabelWeightsUserConfirmed = _as_bool(
+            settings.get(SETTING_AUTOLABEL_WEIGHTS_CONFIRMED, False))
+        if not MainWindow._autolabel_weights_usable(self.autolabel_weights):
+            self.autolabelWeightsUserConfirmed = False
         self.autoUpdateEnabled = _as_bool(settings.get(SETTING_AUTO_UPDATE_ENABLED, True))
         self.updateManifestUrl = ustr(settings.get(SETTING_UPDATE_MANIFEST_URL, ''))
         self.lastUpdateCheckAt = ustr(settings.get(SETTING_LAST_UPDATE_CHECK, ''))
@@ -1580,11 +1596,13 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception:
             return ''
 
-    def _select_model_weight(self, title_text, prefer_model=None, for_autolabel=False):
+    def _select_model_weight(self, title_text, prefer_model=None, for_autolabel=False,
+                             force_browse_default=False):
         """Prefer modern builtin model but keep compatibility with legacy local weights.
 
         for_autolabel: when True, read/write ``self.autolabel_weights`` (Auto Label flows);
         when False, read/write ``self.weights`` (training), so training never steals autolabel weights.
+        force_browse_default: when True with for_autolabel, highlight Browse so Enter does not pick builtin.
         """
         prefer_model = prefer_model or DEFAULT_DETECT_PT
         attr = 'autolabel_weights' if for_autolabel else 'weights'
@@ -1598,12 +1616,17 @@ class MainWindow(QMainWindow, WindowMixin):
         builtin_label = '[Builtin] %s (recommended)' % prefer_model
         browse_label = '[Browse local file...]'
         items = [builtin_label] + local_weights + [browse_label]
-        default_index = 0
         cur = ustr(getattr(self, attr, '') or '').strip()
         if cur:
+            default_index = 0
             current_name = os.path.basename(cur)
             if current_name in local_weights:
                 default_index = items.index(current_name)
+        else:
+            # First-time Auto Label: avoid defaulting to built-in on Enter — user must pick explicitly.
+            default_index = items.index(browse_label) if for_autolabel else 0
+        if for_autolabel and force_browse_default:
+            default_index = items.index(browse_label)
         selected, ok = QInputDialog.getItem(self, "Select", title_text, tuple(items), default_index, False)
         if not ok:
             return ''
@@ -1630,6 +1653,25 @@ class MainWindow(QMainWindow, WindowMixin):
         setattr(self, attr, picked)
         return picked
 
+    def choose_autolabel_model(self):
+        u"""Annotate-Tools「选择自动标注模型」：为快捷键 Q（Auto Label 当前图）指定或更换 YOLO 权重；快捷键 Ctrl+Shift+M。"""
+        prev = ustr(getattr(self, 'autolabel_weights', '') or '').strip()
+        title = u'Auto Label 模型权重（当前: %s）：' % (
+            os.path.basename(prev) if prev else u'(未设置)')
+        wsel = self._select_model_weight(
+            title,
+            prefer_model=DEFAULT_DETECT_PT,
+            for_autolabel=True,
+            force_browse_default=False)
+        if not wsel:
+            return
+        self.autolabelWeightsUserConfirmed = True
+        self._persist_autolabel_settings()
+        disp = ustr(self.autolabel_weights)
+        if len(disp) > 80:
+            disp = '…' + disp[-78:]
+        self.statusBar().showMessage(u'Auto Label 已切换模型: %s' % disp, 8000)
+
     def autoLabelCurrentImg(self):
         assert self.beginner()
         print('auto label current image')
@@ -1639,13 +1681,23 @@ class MainWindow(QMainWindow, WindowMixin):
             source = self.filePath
             xml_path = self.xmlPath
 
-            if not MainWindow._autolabel_weights_usable(self.autolabel_weights):
+            # Ask for weights when unusable, first-run wizard not done, or user never confirmed
+            # in this app generation (old pkl lacked autolabel/weights_confirmed — was skipping dialog).
+            need_weight_dialog = (
+                not MainWindow._autolabel_weights_usable(self.autolabel_weights)
+                or not self.autoLabelSetupDone
+                or not getattr(self, 'autolabelWeightsUserConfirmed', False)
+            )
+            if need_weight_dialog:
                 wsel = self._select_model_weight(
                     "Model weight for Auto Label (default %s):" % DEFAULT_DETECT_PT,
                     prefer_model=DEFAULT_DETECT_PT,
-                    for_autolabel=True)
+                    for_autolabel=True,
+                    force_browse_default=not getattr(self, 'autolabelWeightsUserConfirmed', False))
                 if not wsel:
                     return
+                self.autolabelWeightsUserConfirmed = True
+                self.settings[SETTING_AUTOLABEL_WEIGHTS_CONFIRMED] = True
                 self.settings[SETTING_AUTOLABEL_WEIGHTS] = ustr(self.autolabel_weights)
                 self.settings.save()
 
@@ -3024,6 +3076,7 @@ class MainWindow(QMainWindow, WindowMixin):
                      'file_pruning':self.remove_extra_img_xml,'ca3':self.remove_extra_img_xml,
                      'change_label':self.change_label_name,'c4':self.change_label_name,
                      'fix_property':self.fix_xml_property,'c5':self.fix_xml_property,
+                     'choose_autolabel_model':self.choose_autolabel_model,'csm':self.choose_autolabel_model,
                      'auto_labeling_one':self.auto_labeling_one,'c6':self.auto_labeling_one,
                      'auto_labeling_multi':self.auto_labeling_multi,'c7':self.auto_labeling_multi,
                      'make_training_datasets_one':self.make_datasets_one, 'ca8':self.make_datasets_one,
