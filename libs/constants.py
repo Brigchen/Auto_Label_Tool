@@ -10,10 +10,37 @@ SETTING_WIN_STATE = 'window/state'
 SETTING_SAVE_DIR = 'savedir'
 SETTING_PAINT_LABEL = 'paintlabel'
 SETTING_LAST_OPEN_DIR = 'lastOpenDir'
+SETTING_LAST_WEIGHT_DIR = 'lastWeightDir'
+SETTING_LAST_OPEN_IMAGE = 'lastOpenImage'
 SETTING_AUTO_SAVE = 'autosave'
 SETTING_SINGLE_CLASS = 'singleclass'
 SETTING_Magnifying_Lens = "magnifyinglens"
 FORMAT_PASCALVOC = 'PascalVOC'
 FORMAT_YOLO = 'YOLO'
 SETTING_DRAW_SQUARE = 'draw/square'
+SETTING_DRAW_MODE = 'draw/mode'
+SETTING_YOLO_SAVE_SEG = 'yolo/save_segmentation'
+SETTING_AUTOLABEL_DUP_IOU = 'autolabel/dedup_iou'
+SETTING_AUTOLABEL_WEIGHTS = 'autolabel/weights'
+SETTING_AUTOLABEL_CONF = 'autolabel/conf'
+SETTING_AUTOLABEL_PRED_IOU = 'autolabel/pred_iou'
+SETTING_AUTOLABEL_SETUP_DONE = 'autolabel/setup_done'
+SETTING_FILE_FILTER_SPECIES = 'fileFilter/species'
+SETTING_FILE_FILTER_SCORE_ENABLED = 'fileFilter/score_enabled'
+SETTING_FILE_FILTER_SCORE_THRESHOLD = 'fileFilter/score_threshold'
+SETTING_FILE_FILTER_COUNT_ENABLED = 'fileFilter/count_enabled'
+SETTING_FILE_FILTER_COUNT_THRESHOLD = 'fileFilter/count_threshold'
+SETTING_AUTO_UPDATE_ENABLED = 'update/auto_check_enabled'
+SETTING_UPDATE_MANIFEST_URL = 'update/manifest_url'
+SETTING_LAST_UPDATE_CHECK = 'update/last_check'
+SETTING_KEYPOINT_TEMPLATE = 'keypoints/template'
+SETTING_KEYPOINT_SCHEMA_FILE = 'keypoints/schema_file'
 DEFAULT_ENCODING = 'utf-8'
+APP_VERSION = '3.1.0'
+APP_UPDATE_DATE = '2026-5-12'
+APP_CHANGELOG = [
+    'Configs consolidated under configs/; entrypoints under src/ only',
+    'README.md, CHANGELOG.md, VERSION added',
+    'Prefer local YOLO *.pt (repo weights/ + Ultralytics cache) before hub download; default stub yolo26n.pt',
+    'Product display name: Auto_Label_Tool (general-purpose; fish-only naming removed from app title and docs)',
+]

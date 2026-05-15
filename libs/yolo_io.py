@@ -28,6 +28,19 @@ class YOLOWriter:
         bndbox['difficult'] = difficult
         self.boxlist.append(bndbox)
 
+    def addPolygon(self, points, name, difficult):
+        polygon = {'points': points}
+        polygon['name'] = name
+        polygon['difficult'] = difficult
+        self.boxlist.append(polygon)
+
+    def addKeypoints(self, points, visibility, name, difficult):
+        pose = {'points': points, 'visibility': visibility}
+        pose['name'] = name
+        pose['difficult'] = difficult
+        pose['shape_type'] = 'keypoints'
+        self.boxlist.append(pose)
+
     def BndBox2YoloLine(self, box, classList=[]):
         xmin = box['xmin']
         xmax = box['xmax']
@@ -49,6 +62,64 @@ class YOLOWriter:
 
         return classIndex, xcen, ycen, w, h
 
+    def Polygon2YoloLine(self, polygon, classList=[]):
+        boxName = polygon['name']
+        if boxName not in classList:
+            classList.append(boxName)
+        classIndex = classList.index(boxName)
+
+        points = []
+        for x, y in polygon['points']:
+            px = min(max(float(x) / self.imgSize[1], 0.0), 1.0)
+            py = min(max(float(y) / self.imgSize[0], 0.0), 1.0)
+            points.extend([px, py])
+        return classIndex, points
+
+    def Keypoints2YoloLine(self, pose, classList=[]):
+        boxName = pose['name']
+        if boxName not in classList:
+            classList.append(boxName)
+        classIndex = classList.index(boxName)
+
+        pts = pose.get('points', [])
+        vis = pose.get('visibility', [])
+        if not pts:
+            return None
+
+        def _v(i):
+            if i < len(vis):
+                try:
+                    return int(vis[i])
+                except (TypeError, ValueError):
+                    return 2
+            return 2
+
+        labeled = [(p[0], p[1]) for i, p in enumerate(pts) if _v(i) != 0]
+        if labeled:
+            xs = [p[0] for p in labeled]
+            ys = [p[1] for p in labeled]
+        else:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+
+        xcen = float((xmin + xmax)) / 2 / self.imgSize[1]
+        ycen = float((ymin + ymax)) / 2 / self.imgSize[0]
+        w = float((xmax - xmin)) / self.imgSize[1]
+        h = float((ymax - ymin)) / self.imgSize[0]
+
+        kpts = []
+        for i, (x, y) in enumerate(pts):
+            v = int(vis[i]) if i < len(vis) else 2
+            if v == 0:
+                kpts.extend([0.0, 0.0, 0])
+            else:
+                px = min(max(float(x) / self.imgSize[1], 0.0), 1.0)
+                py = min(max(float(y) / self.imgSize[0], 0.0), 1.0)
+                kpts.extend([px, py, v])
+        return classIndex, xcen, ycen, w, h, kpts
+
     def save(self, classList=[], targetFile=None):
 
         out_file = None #Update yolo .txt
@@ -58,18 +129,36 @@ class YOLOWriter:
             out_file = open(
             self.filename + TXT_EXT, 'w', encoding=ENCODE_METHOD)
             classesFile = os.path.join(os.path.dirname(os.path.abspath(self.filename)), "classes.txt")
-            out_class_file = open(classesFile, 'w')
+            out_class_file = open(classesFile, 'w', encoding=ENCODE_METHOD)
 
         else:
             out_file = codecs.open(targetFile, 'w', encoding=ENCODE_METHOD)
             classesFile = os.path.join(os.path.dirname(os.path.abspath(targetFile)), "classes.txt")
-            out_class_file = open(classesFile, 'w')
+            out_class_file = open(classesFile, 'w', encoding=ENCODE_METHOD)
 
 
         for box in self.boxlist:
-            classIndex, xcen, ycen, w, h = self.BndBox2YoloLine(box, classList)
-            # print (classIndex, xcen, ycen, w, h)
-            out_file.write("%d %.6f %.6f %.6f %.6f\n" % (classIndex, xcen, ycen, w, h))
+            if box.get('shape_type') == 'keypoints':
+                pose_line = self.Keypoints2YoloLine(box, classList)
+                if pose_line is not None:
+                    classIndex, xcen, ycen, w, h, kpts = pose_line
+                    out_file.write(
+                        "%d %.6f %.6f %.6f %.6f %s\n" % (
+                            classIndex, xcen, ycen, w, h,
+                            " ".join(["%.6f" % p if (idx % 3) != 2 else str(int(p))
+                                      for idx, p in enumerate(kpts)])
+                        )
+                    )
+            elif 'points' in box:
+                classIndex, points = self.Polygon2YoloLine(box, classList)
+                if len(points) >= 6:
+                    out_file.write(
+                        "%d %s\n" % (classIndex, " ".join(["%.6f" % p for p in points]))
+                    )
+            else:
+                classIndex, xcen, ycen, w, h = self.BndBox2YoloLine(box, classList)
+                # print (classIndex, xcen, ycen, w, h)
+                out_file.write("%d %.6f %.6f %.6f %.6f\n" % (classIndex, xcen, ycen, w, h))
 
         # print (classList)
         # print (out_class_file)
@@ -80,10 +169,9 @@ class YOLOWriter:
         out_file.close()
 
 
-
 class YoloReader:
 
-    def __init__(self, filepath, image, classListPath=None):
+    def __init__(self, filepath, image, classListPath=None, posed_kpts_count=None):
         # shapes type:
         # [labbel, [(x1,y1), (x2,y2), (x3,y3), (x4,y4)], color, color, difficult]
         self.shapes = []
@@ -97,7 +185,7 @@ class YoloReader:
 
         # print (filepath, self.classListPath)
 
-        classesFile = open(self.classListPath, 'r')
+        classesFile = open(self.classListPath, 'r', encoding='utf-8')
         self.classes = classesFile.read().strip('\n').split('\n')
 
         # print (self.classes)
@@ -106,6 +194,8 @@ class YoloReader:
                       1 if image.isGrayscale() else 3]
 
         self.imgSize = imgSize
+        # If set (e.g. from fish_yolo.yaml kpt_shape[0]), force pose parsing when triplet count matches.
+        self.posed_kpts_count = posed_kpts_count
 
         self.verified = False
         # try:
@@ -119,7 +209,13 @@ class YoloReader:
     def addShape(self, label, xmin, ymin, xmax, ymax, difficult):
 
         points = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
-        self.shapes.append((label, points, None, None, difficult))
+        self.shapes.append((label, points, None, None, difficult, 'bbox', []))
+
+    def addPolygonShape(self, label, points, difficult):
+        self.shapes.append((label, points, None, None, difficult, 'polygon', []))
+
+    def addKeypointShape(self, label, points, visibility, difficult):
+        self.shapes.append((label, points, None, None, difficult, 'keypoints', visibility))
 
     def yoloLine2Shape(self, classIndex, xcen, ycen, w, h):
         label = self.classes[int(classIndex)]
@@ -136,11 +232,74 @@ class YoloReader:
 
         return label, xmin, ymin, xmax, ymax
 
+    def yoloLine2Polygon(self, values):
+        classIndex = int(values[0])
+        label = self.classes[classIndex]
+        coords = values[1:]
+
+        points = []
+        for i in range(0, len(coords), 2):
+            x = min(max(float(coords[i]), 0.0), 1.0)
+            y = min(max(float(coords[i + 1]), 0.0), 1.0)
+            points.append((int(self.imgSize[1] * x), int(self.imgSize[0] * y)))
+        return label, points
+
+    def yoloLine2Keypoints(self, values):
+        classIndex = int(values[0])
+        label = self.classes[classIndex]
+        coords = values[1:]
+        xcen, ycen, w, h = coords[:4]
+        kpts = coords[4:]
+
+        points = []
+        visibility = []
+        for i in range(0, len(kpts), 3):
+            x = min(max(float(kpts[i]), 0.0), 1.0)
+            y = min(max(float(kpts[i + 1]), 0.0), 1.0)
+            v = int(float(kpts[i + 2]))
+            points.append((int(self.imgSize[1] * x), int(self.imgSize[0] * y)))
+            visibility.append(v)
+        return label, points, visibility
+
     def parseYoloFormat(self):
         bndBoxFile = open(self.filepath, 'r')
         for bndBox in bndBoxFile:
-            classIndex, xcen, ycen, w, h = bndBox.split(' ')
-            label, xmin, ymin, xmax, ymax = self.yoloLine2Shape(classIndex, xcen, ycen, w, h)
+            values = bndBox.strip().split()
+            if not values:
+                continue
 
-            # Caveat: difficult flag is discarded when saved as yolo format.
-            self.addShape(label, xmin, ymin, xmax, ymax, False)
+            # YOLO detection format: class cx cy w h
+            if len(values) == 5:
+                classIndex, xcen, ycen, w, h = values
+                label, xmin, ymin, xmax, ymax = self.yoloLine2Shape(classIndex, xcen, ycen, w, h)
+                # Caveat: difficult flag is discarded when saved as yolo format.
+                self.addShape(label, xmin, ymin, xmax, ymax, False)
+                continue
+
+            # YOLO pose format (Ultralytics): class cx cy w h (x y v)...
+            if len(values) >= 8 and (len(values) - 5) % 3 == 0:
+                # Use visibility triplet check to distinguish pose vs segmentation.
+                is_pose_line = True
+                nk = (len(values) - 5) // 3
+                if self.posed_kpts_count is not None and nk != int(self.posed_kpts_count):
+                    is_pose_line = False
+                for i in range(7, len(values), 3):
+                    try:
+                        v = int(float(values[i]))
+                    except Exception:
+                        is_pose_line = False
+                        break
+                    if v not in (0, 1, 2):
+                        is_pose_line = False
+                        break
+                if is_pose_line:
+                    label, points, visibility = self.yoloLine2Keypoints(values)
+                    if len(points) >= 1:
+                        self.addKeypointShape(label, points, visibility, False)
+                    continue
+
+            # YOLO segmentation format: class x1 y1 x2 y2 ...
+            if len(values) >= 7 and (len(values) - 1) % 2 == 0:
+                label, points = self.yoloLine2Polygon(values)
+                if len(points) >= 3:
+                    self.addPolygonShape(label, points, False)

@@ -83,7 +83,7 @@ def generateColorByText(text):
     r = int((hashCode / 255) % 255)
     g = int((hashCode / 65025)  % 255)
     b = int((hashCode / 16581375)  % 255)
-    return QColor(r, g, b, 100)
+    return QColor(r, g, b, 200)
 
 def have_qstring():
     '''p3/qt5 get rid of QString wrapper as py3 has native unicode str type'''
@@ -101,3 +101,12 @@ def natural_sort(list, key=lambda s:s):
         return lambda s: [convert(c) for c in re.split('([0-9]+)', key(s))]
     sort_key = get_alphanum_key_func(key)
     list.sort(key=sort_key)
+
+def remove_novel(old):
+#    old = os.path.splitext(filename)[0]
+#    filetype = os.path.splitext(filename)[-1]    
+    old = old.replace(' ', '_')
+    new = re.sub('([^\u0030-\u0039\u0041-\u007a\u005F\u002D])', '', old)
+#    new_filename = new+filetype
+
+    return new

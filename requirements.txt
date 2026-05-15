@@ -1,11 +1,13 @@
-natsort
-strsimpy
-easygui
-pyautogui
-pyqt5>=5.14.1
-lxml>=4.6.5
-opencv-python>=4.1.1.26
-opencv-contrib-python>=4.1.1.26
-torch==1.13.1
-torchvision==0.7.0
-
+﻿# Runtime deps for src/ALT.py (PyTorch: install separately from pytorch.org to match your CUDA/CPU).
+PyQt5>=5.12
+opencv-python>=4.5
+ultralytics>=8.0
+natsort>=8.0
+easygui>=0.98
+strsimpy>=0.2.0
+xpinyin>=0.5.11
+PyYAML>=5.4
+pynvml>=11.0
+psutil>=5.8
+lxml>=4.6
+Pillow>=8.0

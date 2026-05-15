@@ -2,13 +2,13 @@ import pickle
 import os
 import sys
 
+from libs.repo_paths import configs_dir
+
 
 class Settings(object):
     def __init__(self):
-        # Be default, the home will be in the same folder as labelImg
-        home = os.path.expanduser("~")
         self.data = {}
-        self.path = os.path.join(home, '.labelImgSettings.pkl')
+        self.path = os.path.join(configs_dir(), "ALT_Settings.pkl")
 
     def __setitem__(self, key, value):
         self.data[key] = value
@@ -23,6 +23,9 @@ class Settings(object):
 
     def save(self):
         if self.path:
+            parent_dir = os.path.dirname(self.path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
             with open(self.path, 'wb') as f:
                 pickle.dump(self.data, f, pickle.HIGHEST_PROTOCOL)
                 return True

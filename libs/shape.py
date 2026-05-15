@@ -12,7 +12,7 @@ except ImportError:
 from libs.utils import distance
 import sys
 
-DEFAULT_LINE_COLOR = QColor(0, 255, 0, 128)
+DEFAULT_LINE_COLOR = QColor(128, 0, 255, 200)
 DEFAULT_FILL_COLOR = QColor(255, 0, 0, 128)
 DEFAULT_SELECT_LINE_COLOR = QColor(255, 255, 255)
 DEFAULT_SELECT_FILL_COLOR = QColor(0, 128, 255, 155)
@@ -35,16 +35,22 @@ class Shape(object):
     vertex_fill_color = DEFAULT_VERTEX_FILL_COLOR
     hvertex_fill_color = DEFAULT_HVERTEX_FILL_COLOR
     point_type = P_ROUND
-    point_size = 8
+    point_size = 12
     scale = 1.0
 
-    def __init__(self, label=None, line_color=None, difficult=False, paintLabel=False):
+    def __init__(self, label=None, line_color=None, difficult=False, paintLabel=False, shape_type='bbox'):
         self.label = label
         self.points = []
+        self.shape_type = shape_type
+        self.keypoint_visibility = []
+        self.keypoint_names = []
+        self.skeleton = []
         self.fill = False
         self.selected = False
         self.difficult = difficult
         self.paintLabel = paintLabel
+        # Keypoints: double-click body selects whole instance; all vertices drawn as squares for group move/delete.
+        self.keypoints_bulk_select = False
 
         self._highlightIndex = None
         self._highlightMode = self.NEAR_VERTEX
@@ -65,13 +71,10 @@ class Shape(object):
         self._closed = True
 
     def reachMaxPoints(self):
-        if len(self.points) >= 4:
-            return True
         return False
 
     def addPoint(self, point):
-        if not self.reachMaxPoints():
-            self.points.append(point)
+        self.points.append(point)
 
     def popPoint(self):
         if self.points:
@@ -84,6 +87,19 @@ class Shape(object):
     def setOpen(self):
         self._closed = False
 
+    def _kpt_labeled(self, i):
+        """YOLO pose v: 0=not labeled, 1=occluded, 2=visible — only v==0 is hidden in the UI."""
+        if self.shape_type != 'keypoints':
+            return True
+        if i < 0:
+            return False
+        if i >= len(self.keypoint_visibility):
+            return True
+        try:
+            return int(self.keypoint_visibility[i]) != 0
+        except (TypeError, ValueError):
+            return True
+
     def paint(self, painter):
         if self.points:
             color = self.select_line_color if self.selected else self.line_color
@@ -95,39 +111,68 @@ class Shape(object):
             line_path = QPainterPath()
             vrtx_path = QPainterPath()
 
-            line_path.moveTo(self.points[0])
-            # Uncommenting the following line will draw 2 paths
-            # for the 1st vertex, and make it non-filled, which
-            # may be desirable.
-            #self.drawVertex(vrtx_path, 0)
-
-            for i, p in enumerate(self.points):
-                line_path.lineTo(p)
-                self.drawVertex(vrtx_path, i)
-            if self.isClosed():
-                line_path.lineTo(self.points[0])
+            is_kpt = self.shape_type == 'keypoints'
+            if not is_kpt:
+                line_path.moveTo(self.points[0])
+                for i, p in enumerate(self.points):
+                    line_path.lineTo(p)
+                    self.drawVertex(vrtx_path, i)
+                if self.isClosed():
+                    line_path.lineTo(self.points[0])
+            else:
+                bulk = self.selected and getattr(self, 'keypoints_bulk_select', False)
+                if bulk:
+                    for i, p in enumerate(self.points):
+                        self.drawVertex(vrtx_path, i)
+                else:
+                    for i, p in enumerate(self.points):
+                        if self._kpt_labeled(i):
+                            self.drawVertex(vrtx_path, i)
 
             painter.drawPath(line_path)
             painter.drawPath(vrtx_path)
             painter.fillPath(vrtx_path, self.vertex_fill_color)
 
+            if self.shape_type == 'keypoints' and self.skeleton:
+                skeleton_pen = QPen(color)
+                skeleton_pen.setWidth(max(1, int(round(1.5 / self.scale))))
+                painter.setPen(skeleton_pen)
+                for a, b in self.skeleton:
+                    if not (self._kpt_labeled(a) and self._kpt_labeled(b)):
+                        continue
+                    if 0 <= a < len(self.points) and 0 <= b < len(self.points):
+                        painter.drawLine(self.points[a], self.points[b])
+
             # Draw text at the top-left
             if self.paintLabel:
                 min_x = sys.maxsize
                 min_y = sys.maxsize
-                for point in self.points:
+                bulk_lbl = is_kpt and self.selected and getattr(self, 'keypoints_bulk_select', False)
+                for i, point in enumerate(self.points):
+                    if is_kpt and not bulk_lbl and not self._kpt_labeled(i):
+                        continue
                     min_x = min(min_x, point.x())
                     min_y = min(min_y, point.y())
                 if min_x != sys.maxsize and min_y != sys.maxsize:
                     font = QFont()
-                    font.setPointSize(8)
+                    font.setPointSize(32)
                     font.setBold(True)
                     painter.setFont(font)
+                    #painter.setPen(QColor(255,255,255,255))
                     if(self.label == None):
                         self.label = ""
                     if(min_y < MIN_Y_LABEL):
                         min_y += MIN_Y_LABEL
-                    painter.drawText(min_x, min_y, self.label)
+                    painter.drawText(int(min_x), int(min_y), self.label)
+
+            if self.shape_type == 'keypoints' and self.keypoint_names:
+                painter.setPen(QColor(255, 255, 0))
+                bulk = self.selected and getattr(self, 'keypoints_bulk_select', False)
+                for i, point in enumerate(self.points):
+                    if not bulk and not self._kpt_labeled(i):
+                        continue
+                    if i < len(self.keypoint_names):
+                        painter.drawText(int(point.x()) + 4, int(point.y()) - 4, self.keypoint_names[i])
 
             if self.fill:
                 color = self.select_fill_color if self.selected else self.fill_color
@@ -135,11 +180,13 @@ class Shape(object):
 
     def drawVertex(self, path, i):
         d = self.point_size / self.scale
-        shape = self.point_type
+        bulk = self.shape_type == 'keypoints' and self.selected and getattr(self, 'keypoints_bulk_select', False)
+        shape = self.P_SQUARE if bulk else self.point_type
         point = self.points[i]
         if i == self._highlightIndex:
-            size, shape = self._highlightSettings[self._highlightMode]
+            size, hv_shape = self._highlightSettings[self._highlightMode]
             d *= size
+            shape = self.P_SQUARE if bulk else hv_shape
         if self._highlightIndex is not None:
             self.vertex_fill_color = self.hvertex_fill_color
         else:
@@ -153,6 +200,7 @@ class Shape(object):
 
     def nearestVertex(self, point, epsilon):
         for i, p in enumerate(self.points):
+            # Keypoints: include v==0 slots (phantom positions) so they can be selected / deleted / moved.
             if distance(p - point) <= epsilon:
                 return i
         return None
@@ -183,8 +231,12 @@ class Shape(object):
         self._highlightIndex = None
 
     def copy(self):
-        shape = Shape("%s" % self.label)
+        shape = Shape("%s" % self.label, shape_type=self.shape_type)
         shape.points = [p for p in self.points]
+        shape.keypoint_visibility = list(self.keypoint_visibility)
+        shape.keypoint_names = list(self.keypoint_names)
+        shape.skeleton = list(self.skeleton)
+        shape.keypoints_bulk_select = False
         shape.fill = self.fill
         shape.selected = self.selected
         shape._closed = self._closed

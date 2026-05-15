@@ -13,6 +13,9 @@ from libs.pascal_voc_io import XML_EXT
 import os.path
 import sys
 
+import warnings
+warnings.filterwarnings('ignore')
+
 
 class LabelFileError(Exception):
     pass
@@ -38,7 +41,12 @@ class LabelFile(object):
         # Read from file path because self.imageData might be empty if saving to
         # Pascal format
         image = QImage()
-        image.load(imagePath)
+        ok = image.load(imagePath)
+        if not ok:
+            print('image format eroor, and try to retrieve it anyway')
+            with open(imagePath,'rb') as f:
+                image.loadFromData(f.read())
+        # image.load(imagePath)
         imageShape = [image.height(), image.width(),
                       1 if image.isGrayscale() else 3]
         writer = PascalVocWriter(imgFolderName, imgFileName,
@@ -57,6 +65,7 @@ class LabelFile(object):
         return
 
     def saveYoloFormat(self, filename, shapes, imagePath, imageData, classList,
+                            saveSegmentation=False,
                             lineColor=None, fillColor=None, databaseSrc=None):
         imgFolderPath = os.path.dirname(imagePath)
         imgFolderName = os.path.split(imgFolderPath)[-1]
@@ -65,7 +74,11 @@ class LabelFile(object):
         # Read from file path because self.imageData might be empty if saving to
         # Pascal format
         image = QImage()
-        image.load(imagePath)
+        ok = image.load(imagePath)
+        if not ok:
+            print('image format eroor, and try to retrieve it anyway')
+            with open(imagePath,'rb') as f:
+                image.loadFromData(f.read())
         imageShape = [image.height(), image.width(),
                       1 if image.isGrayscale() else 3]
         writer = YOLOWriter(imgFolderName, imgFileName,
@@ -77,11 +90,42 @@ class LabelFile(object):
             label = shape['label']
             # Add Chris
             difficult = int(shape['difficult'])
-            bndbox = LabelFile.convertPoints2BndBox(points)
-            writer.addBndBox(bndbox[0], bndbox[1], bndbox[2], bndbox[3], label, difficult)
+            shape_type = shape.get('shape_type', 'bbox')
+            if shape_type == 'keypoints':
+                writer.addKeypoints(points, shape.get('keypoint_visibility', []), label, difficult)
+            elif saveSegmentation:
+                writer.addPolygon(points, label, difficult)
+            else:
+                bndbox = LabelFile.convertPoints2BndBox(points)
+                writer.addBndBox(bndbox[0], bndbox[1], bndbox[2], bndbox[3], label, difficult)
 
         writer.save(targetFile=filename, classList=classList)
         return
+    
+    # def saveDet2Yolo(self, filename, dets, imagePath, imageData, classList):
+    #     imgFolderPath = os.path.dirname(imagePath)
+    #     imgFolderName = os.path.split(imgFolderPath)[-1]
+    #     imgFileName = os.path.basename(imagePath)
+    #     #imgFileNameWithoutExt = os.path.splitext(imgFileName)[0]
+    #     # Read from file path because self.imageData might be empty if saving to
+    #     # Pascal format
+    #     image = QImage()
+    #     ok = image.load(imagePath)
+    #     if not ok:
+    #         print('image format eroor, and try to retrieve it anyway')
+    #         with open(imagePath,'rb') as f:
+    #             image.loadFromData(f.read())
+    #     imageShape = [image.height(), image.width(),
+    #                   1 if image.isGrayscale() else 3]
+    #     writer = YOLOWriter(imgFolderName, imgFileName,
+    #                              imageShape, localImgPath=imagePath)
+    #     writer.verified = self.verified
+        
+    #     for det in dets:
+    #         writer.addBndBox(bndbox[0], bndbox[1], bndbox[2], bndbox[3], label, difficult)
+
+    #     writer.save(targetFile=filename, classList=classList)
+    #     return
 
     def toggleVerify(self):
         self.verified = not self.verified
@@ -144,3 +188,4 @@ class LabelFile(object):
             ymin = 1
 
         return (int(xmin), int(ymin), int(xmax), int(ymax))
+
