@@ -1,36 +1,39 @@
 # Auto_Label_Tool
 
-PyQt5 desktop tools for **manual + automatic labeling**, **video detection / RTSP demos**, and **Ultralytics YOLO training** (detection, pose, segmentation, etc.). Suitable for general object-labeling workflows, not limited to a single domain.
+基于 **PyQt5** 的桌面工具集：支持 **手动与自动标注**、**视频 / RTSP 检测演示**，以及基于 **Ultralytics YOLO** 的训练（检测、姿态、分割等）。适用于通用目标检测标注流程。
 
-## Version
+---
 
-- Current version: see **`VERSION`** (also mirrored in `libs/constants.py` as `APP_VERSION` / `APP_UPDATE_DATE`).
-- Release notes: **`CHANGELOG.md`**.
+## 功能简介（简版）
 
-## Repository layout
-
-| Path | Role |
+| 模块 | 说明 |
 |------|------|
-| `src/ALT.py` | Main labeling app: VOC / YOLO, keypoints, auto-label, training hooks. |
-| `src/FishVision_GUI.py` | Video / RTSP preview, detection, optional tracking & enhancement. |
-| `src/FishVision_Train_GUI.py` | Training UI: yaml + weights + hyperparameters + task type (`detect`, `pose`, `segment`, …). |
-| `libs/` | Shared UI, IO, settings, YOLO/VOC helpers, export (`model_export`), overlay checks (`overlay_check`), taxon screening (`taxa_screen`). |
-| `configs/` | **Application configuration** — `config.ini` (FishVision), `config_FVT.ini` (trainer), `ALT_Settings.pkl` (ALT window/state), and any `config_*.ini` you add. |
-| `datasets/` | User datasets (images, labels, yaml); not part of the application package. |
-| `resources/` | Icons and `strings` for Qt resources (`resources.qrc` → `libs/resources.py`). |
-| `weights/` | Place your `.pt` weights here (recommended). |
+| **ALT 标注主程序**（`src/ALT.py`） | VOC / YOLO 格式、关键点、自动标注、视频追踪标注、放大镜、类别筛选与统计、标注校正、与训练流程衔接等。 |
+| **FishVision**（`src/FishVision_GUI.py`） | 视频或 RTSP 预览、检测，可选跟踪与画面增强。 |
+| **FishVision 训练界面**（`src/FishVision_Train_GUI.py`） | 图形化配置 yaml、权重、超参与任务类型（`detect`、`pose`、`segment` 等）。 |
 
-## How to run
+共享逻辑在 `libs/`（IO、设置、YOLO/VOC、导出、叠加检查等）；应用配置在 `configs/`；**数据**建议放在 `datasets/`、**权重**放在 `weights/`（仓库内已有占位说明，大文件默认不提交）。
 
-1. Create / activate a Python environment with **PyTorch** (install from [PyTorch](https://pytorch.org/) for your CUDA/CPU), then install Python deps from the repo root:
+---
+
+## 安装（简版）
+
+1. **准备 Python 环境**（建议 3.8+），并自行安装 **PyTorch**（按显卡/CPU 从 [pytorch.org](https://pytorch.org/) 选择命令；`requirements.txt` 一般不包含 `torch`）。
+2. **克隆或解压**本仓库到本地工作目录。
+3. 在**仓库根目录**执行依赖安装：
 
 ```bat
 py -3 -m pip install -r requirements.txt
 ```
 
-(`requirements.txt` lists packages such as **natsort**, PyQt5, OpenCV, ultralytics, etc.; it does not install `torch`—use your existing PyTorch env.)
+4. 将所用 **`.pt` / `.pth` 权重** 放到 **`weights/`**（推荐）；图像与标注等数据放到 **`datasets/`**（子目录结构可与软件内配置一致）。
 
-2. From the **repository root** (so `datasets/`, `configs/`, `weights/` resolve correctly):
+---
+
+## 使用说明（简版）
+
+1. **始终在仓库根目录启动**（保证 `configs/`、`datasets/`、`weights/` 等相对路径正确）。
+2. **Windows**：可直接双击根目录下的批处理；或在已激活环境的终端中执行：
 
 ```bat
 python src\ALT.py
@@ -38,34 +41,51 @@ python src\FishVision_GUI.py
 python src\FishVision_Train_GUI.py
 ```
 
-On Windows you can double-click the `.bat` files in the repo root. They **`cd` to the repo folder**, then pick a Python in this order:
+- `Auto_Label_Tool.bat` → 启动 ALT  
+- `FishVision.bat` → FishVision  
+- `FishVision_trainer.bat` → 训练界面  
 
-1. **`AUTO_LABEL_PYTHON`** if set and the file exists (for any conda env or custom install).
-2. **`C:\ProgramData\Anaconda3\python.exe`** if present (typical “All Users” Anaconda).
-3. **`py -3`** if the Python launcher is on `PATH`.
-4. **`python`** on `PATH`.
+3. **Python 解释器选择顺序**（批处理内）：若设置了环境变量 **`AUTO_LABEL_PYTHON`** 且路径存在，则优先使用；否则依次尝试 `C:\ProgramData\Anaconda3\python.exe`、`py -3`、`python`。使用非上述路径的 Conda 环境时，请设置 `AUTO_LABEL_PYTHON` 指向该环境的 `python.exe`，或在激活环境后于终端运行上述 `python` 命令。
 
-If you use a **conda env** that is *not* the base install above, either set `AUTO_LABEL_PYTHON` to that env’s `python.exe`, or run from an activated terminal: `python src\ALT.py`. You can also create a tiny wrapper `.bat` that runs `call conda activate your_env` then calls the same `python.exe` path.
+4. **配置**  
+   - ALT 窗口与状态：`configs/` 下由程序生成的 `ALT_Settings.pkl` 等（由 `libs/settings.py` 管理）。  
+   - FishVision：`configs/config.ini`  
+   - 训练界面：`configs/config_FVT.ini`  
+   其他自定义 `config_*.ini` 请放在 **`configs/`**。
 
-- `Auto_Label_Tool.bat` — starts ALT  
-- `FishVision.bat` — FishVision GUI  
-- `FishVision_trainer.bat` — FishVision trainer  
+---
 
-## Configuration
+## 版本与变更记录
 
-- **ALT**: persistent UI/state in `configs/ALT_Settings.pkl` (managed by `libs/settings.py`).
-- **FishVision**: `configs/config.ini`
-- **FishVision Train**: `configs/config_FVT.ini`
-- Additional `config_*.ini` files belong under **`configs/`**; migrate any old copies from the repo root if you still have them locally.
+- 当前版本号见根目录 **`VERSION`**（程序内亦可能与 `libs/constants.py` 中版本信息对应）。  
+- 变更说明见 **`CHANGELOG.md`**。
 
-## Developer notes
+---
 
-- After editing `resources/strings/*.properties` or icons, regenerate Qt resources:  
-  `pyrcc5 resources.qrc -o libs/resources.py`
-- ONNX / TensorRT helpers: `from libs.model_export import export_yolo_pt_to_onnx, build_tensorrt_engine`
-- Label hygiene: `from libs.overlay_check import remove_overlay, process_yolo_tree`
-- Taxon screening: `from libs.taxa_screen import main_yolo, main_xml`
+## 仓库结构（简表）
 
-## License / contact
+| 路径 | 作用 |
+|------|------|
+| `src/ALT.py` | 主标注程序 |
+| `src/FishVision_GUI.py` | 视频 / RTSP 工具 |
+| `src/FishVision_Train_GUI.py` | 训练图形界面 |
+| `libs/` | 公共库与资源加载 |
+| `configs/` | 应用 ini / 本地状态 |
+| `datasets/`、`weights/` | 用户数据与权重（见各目录内 `README.md`） |
+| `resources/` | 图标、字体、Qt 字符串资源 |
 
-See `setup.py` and in-app **About** for maintainer and license metadata.
+修改 `resources/strings/*.properties` 或图标后，如需重新打包资源，可在具备 PyQt 工具的环境下执行：  
+`pyrcc5 resources.qrc -o libs/resources.py`
+
+---
+
+## 许可证与联系
+
+详见 **`LICENSE`** 及程序内 **关于** 信息。  
+另有一份历史中文说明 **`readme_CN.md`**（部分内容可能与当前目录结构不一致，请以本 `README.md` 为准）。
+
+---
+
+## English (brief)
+
+PyQt5 desktop suite for manual/auto labeling, video/RTSP demos, and Ultralytics YOLO training. Install PyTorch separately, then `pip install -r requirements.txt` from repo root. Run `python src\ALT.py` (and sibling scripts) or use the `.bat` launchers on Windows. Data → `datasets/`, weights → `weights/`, settings → `configs/`.
