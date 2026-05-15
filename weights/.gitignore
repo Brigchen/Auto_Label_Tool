@@ -1,0 +1,4 @@
+# Track only this folder scaffold on GitHub; ignore all user weights here.
+*
+!.gitignore
+!README.md

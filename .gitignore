@@ -1,7 +1,6 @@
 # User data & training outputs (not pushed to GitHub)
-datasets/
+# datasets/ and weights/ exist in-repo with README + .gitignore; see those folders.
 runs/
-weights/
 
 # Local / IDE
 resources/icons/.DS_Store
