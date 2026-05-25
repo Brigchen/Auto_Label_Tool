@@ -1,5 +1,3 @@
-# 数据目录（datasets）
+# datasets
 
-将图像、标注（如 YOLO / VOC）等训练或评测数据放在此目录下；具体子目录结构以软件内配置为准。
-
-克隆仓库后，请在本机把数据拷贝到此处。除本说明与 `.gitignore` 外，该目录下的其它文件不会被提交到 Git。
+Place training/labeling data here. Contents are ignored by git except this README.

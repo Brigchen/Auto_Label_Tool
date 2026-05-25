@@ -10,7 +10,7 @@
 |------|------|
 | **ALT 标注主程序**（`src/ALT.py`） | VOC / YOLO 格式、关键点、自动标注、视频追踪标注、放大镜、类别筛选与统计、标注校正、与训练流程衔接等。 |
 | **FishVision**（`src/FishVision_GUI.py`） | 视频或 RTSP 预览、检测，可选跟踪与画面增强。 |
-| **FishVision 训练界面**（`src/FishVision_Train_GUI.py`） | 图形化配置 yaml、权重、超参与任务类型（`detect`、`pose`、`segment` 等）。 |
+| **FishVision 训练界面**（`src/FishVision_Train_GUI.py`） | 五选项卡训练控制台：基本参数、优化器、数据增强、硬件/高级、自动调参；实时单行进度（s/it、ETA）、每 epoch 指标摘要；退出自动保存参数；TensorBoard / 终端训练；训练结束自动复制 `best.pt` 到 `weights/`。 |
 
 共享逻辑在 `libs/`（IO、设置、YOLO/VOC、导出、叠加检查等）；应用配置在 `configs/`；**数据**建议放在 `datasets/`、**权重**放在 `weights/`（仓库内已有占位说明，大文件默认不提交）。
 
@@ -50,8 +50,15 @@ python src\FishVision_Train_GUI.py
 4. **配置**  
    - ALT 窗口与状态：`configs/` 下由程序生成的 `ALT_Settings.pkl` 等（由 `libs/settings.py` 管理）。  
    - FishVision：`configs/config.ini`  
-   - 训练界面：`configs/config_FVT.ini`  
+   - 训练界面：首次模板 `configs/config_FVT.ini`；**上次会话**自动保存为 `configs/config_FVT_last.ini`（关闭 GUI 或开始训练时写入，下次启动优先加载）。  
    其他自定义 `config_*.ini` 请放在 **`configs/`**。
+
+5. **训练（FishVision Trainer）**  
+   - 在 GUI 中配置 data yaml、权重、batch/imgsz/workers/cache/AMP 等，点击「开始训练」。  
+   - 底部状态栏显示实时 batch 进度；日志区每 epoch 输出一行验证指标。  
+   - 「终端运行」在独立 cmd 窗口执行，便于查看完整 Ultralytics 输出。  
+   - 「TensorBoard」指向 `runs/`（实际 run 在 `runs/detect/<name>` 等子目录）。  
+   - 大显存 + 大数据集建议：`workers=4`、`cache=disk` 或 `ram`；RTX 50 系列需 PyTorch 2.x + cu128。
 
 ---
 
@@ -68,7 +75,9 @@ python src\FishVision_Train_GUI.py
 |------|------|
 | `src/ALT.py` | 主标注程序 |
 | `src/FishVision_GUI.py` | 视频 / RTSP 工具 |
-| `src/FishVision_Train_GUI.py` | 训练图形界面 |
+| `src/FishVision_Train_GUI.py` | 训练图形界面（选项卡控制台） |
+| `libs/fvt_train_runner.py` | 训练执行与进度/导出逻辑 |
+| `libs/train_monitor.py` | TensorBoard、results.csv 监控 |
 | `libs/` | 公共库与资源加载 |
 | `configs/` | 应用 ini / 本地状态 |
 | `datasets/`、`weights/` | 用户数据与权重（见各目录内 `README.md`） |

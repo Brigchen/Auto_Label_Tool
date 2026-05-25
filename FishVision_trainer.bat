@@ -1,5 +1,6 @@
 @echo off
 REM Prefer All Users Anaconda. Override: set AUTO_LABEL_PYTHON=C:\path\to\python.exe
+set CUBLAS_WORKSPACE_CONFIG=:4096:8
 pushd "%~dp0"
 if defined AUTO_LABEL_PYTHON if exist "%AUTO_LABEL_PYTHON%" goto run_custom
 if exist "C:\ProgramData\Anaconda3\python.exe" goto run_conda

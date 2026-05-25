@@ -21,6 +21,8 @@ cscope*
 
 # Runtime / secrets / large binaries
 *.pkl
+config_FVT_last.ini
+_fvt_debug_run.py
 *.h5
 *.pt
 *.pth

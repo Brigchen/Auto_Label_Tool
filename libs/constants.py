@@ -38,11 +38,11 @@ SETTING_LAST_UPDATE_CHECK = 'update/last_check'
 SETTING_KEYPOINT_TEMPLATE = 'keypoints/template'
 SETTING_KEYPOINT_SCHEMA_FILE = 'keypoints/schema_file'
 DEFAULT_ENCODING = 'utf-8'
-APP_VERSION = '3.1.0'
-APP_UPDATE_DATE = '2026-5-12'
+APP_VERSION = '3.2.0'
+APP_UPDATE_DATE = '2026-5-21'
 APP_CHANGELOG = [
-    'Configs consolidated under configs/; entrypoints under src/ only',
-    'README.md, CHANGELOG.md, VERSION added',
-    'Prefer local YOLO *.pt (repo weights/ + Ultralytics cache) before hub download; default stub yolo26n.pt',
-    'Product display name: Auto_Label_Tool (general-purpose; fish-only naming removed from app title and docs)',
+    'FishVision Trainer: tabbed GUI (basic/optimizer/augment/hardware/tune), live tqdm progress, epoch summaries',
+    'Session config: auto-save on exit to configs/config_FVT_last.ini; resume last params on startup',
+    'Training runner: TensorBoard enable, CUDA/sm_120 audit, AMP prefetch, best.pt export to weights/',
+    'Terminal training mode, results.csv watcher, exist_ok/resume run-dir handling',
 ]
