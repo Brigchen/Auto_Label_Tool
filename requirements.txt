@@ -1,13 +1,42 @@
-﻿# Runtime deps for src/ALT.py (PyTorch: install separately from pytorch.org to match your CUDA/CPU).
-PyQt5>=5.12
-opencv-python>=4.5
-ultralytics>=8.0
-natsort>=8.0
-easygui>=0.98
+# Auto_Label_Tool - install from repo root:
+#   py -3 -m pip install -r requirements.txt
+#
+# Python 3.8-3.11 recommended (3.9+ tested with FishVision Trainer).
+# Install PyTorch separately (see README):
+#   CPU:  pip install torch torchvision
+#   CUDA: https://pytorch.org/get-started/locally/
+#   RTX 50 (sm_120): PyTorch 2.x + cu128, e.g.
+#     pip install -U --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+# --- Core ML / vision ---
+# torch          # not pinned - install for your CUDA/CPU stack
+# torchvision    # not pinned
+ultralytics>=8.3.0
+opencv-python>=4.8.0
+numpy>=1.23.0
+Pillow>=9.0.0
+PyYAML>=6.0
+
+# --- GUI (ALT, FishVision, FishVision Trainer) ---
+PyQt5>=5.12.0
+
+# --- ALT labeling and utilities ---
+natsort>=8.0.0
+easygui>=0.98.0
 strsimpy>=0.2.0
 xpinyin>=0.5.11
-PyYAML>=5.4
-pynvml>=11.0
-psutil>=5.8
-lxml>=4.6
-Pillow>=8.0
+lxml>=4.9.0
+pyautogui>=0.9.50
+pandas>=1.5.0
+
+# --- GPU / system monitoring (batch estimate, CUDA warnings) ---
+pynvml>=11.5.0
+psutil>=5.9.0
+
+# --- FishVision Trainer (TensorBoard integration) ---
+tensorboard>=2.12.0
+
+# --- Optional (not required for normal use) ---
+# onnx>=1.14.0              # model export (Ultralytics ONNX)
+# onnxruntime>=1.15.0
+# tensorrt                  # libs/model_export.py TensorRT build

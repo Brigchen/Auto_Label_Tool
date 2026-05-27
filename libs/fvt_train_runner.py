@@ -18,6 +18,7 @@ if not os.environ.get("CUBLAS_WORKSPACE_CONFIG"):
 import torch
 from ultralytics import YOLO
 
+from libs.lr_schedules import install_lr_schedule_hooks, resolve_cos_lr
 from libs.repo_paths import repo_root
 from libs.train_monitor import (
     enable_ultralytics_tensorboard,
@@ -61,6 +62,18 @@ _VAL_METRICS_ROW = re.compile(
     r"^\s*(all|\S+)\s+\d+\s+\d+\s+\d+\.\d",
     re.I,
 )
+# Full ANSI sequences; orphaned "34m" when ESC+[ is dropped on Windows GUI pipes
+_ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_ORPHAN_SGR = re.compile(r"(?:\d{1,3};)*\d{1,3}m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove terminal color codes; fix bare '34m' fragments in GUI log widgets."""
+    if not text:
+        return text
+    text = _ANSI_ESCAPE.sub("", text)
+    text = _ORPHAN_SGR.sub("", text)
+    return text
 
 
 class TrainProgressStream:
@@ -86,7 +99,7 @@ class TrainProgressStream:
     def _last_segment(text: str) -> str:
         if "\r" in text:
             text = text.split("\r")[-1]
-        return text.strip("\033[K ")
+        return strip_ansi(text.strip("\033[K "))
 
     @staticmethod
     def _is_live_progress(line: str) -> bool:
@@ -140,6 +153,8 @@ class TrainProgressStream:
         if not text:
             return ""
         is_tty = self._is_tty(inner)
+        if not is_tty:
+            text = strip_ansi(text)
 
         # Pure tqdm carriage-return update
         if "\r" in text and "\n" not in text.strip():
@@ -154,7 +169,7 @@ class TrainProgressStream:
         out: List[str] = []
         while "\n" in self._carry:
             nl = self._carry.find("\n")
-            line = self._carry[:nl].strip("\033[K ")
+            line = strip_ansi(self._carry[:nl].strip("\033[K "))
             self._carry = self._carry[nl + 1:]
             if not line:
                 continue
@@ -175,7 +190,7 @@ class TrainProgressStream:
         if not self._carry.strip():
             self._carry = ""
             return ""
-        line = self._carry.strip("\033[K ")
+        line = strip_ansi(self._carry.strip("\033[K "))
         self._carry = ""
         if self._skip_noise_line(line):
             return ""
@@ -350,6 +365,76 @@ def _log_ts(msg: str, log: LogFn = print) -> None:
     log(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
 
+def checkpoint_has_nonfinite(path: str) -> Tuple[bool, str]:
+    """True if a YOLO .pt checkpoint contains NaN/Inf tensors (common after failed AMP runs)."""
+    if not path or not os.path.isfile(path):
+        return False, ""
+    try:
+        try:
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            ckpt = torch.load(path, map_location="cpu")
+    except Exception:
+        return False, ""
+
+    def _scan_tensors(obj, prefix: str) -> Optional[str]:
+        if obj is None:
+            return None
+        if hasattr(obj, "state_dict"):
+            obj = obj.state_dict()
+        elif isinstance(obj, dict) and "state_dict" in obj:
+            obj = obj["state_dict"]
+        if not isinstance(obj, dict):
+            return None
+        for key, val in obj.items():
+            if not isinstance(val, torch.Tensor):
+                continue
+            if torch.isnan(val).any():
+                return f"{prefix}.{key} NaN"
+            if torch.isinf(val).any():
+                return f"{prefix}.{key} Inf"
+        return None
+
+    if isinstance(ckpt, dict):
+        for name in ("ema", "model"):
+            if name in ckpt:
+                hit = _scan_tensors(ckpt[name], name)
+                if hit:
+                    return True, hit
+        hit = _scan_tensors(ckpt, "ckpt")
+        if hit:
+            return True, hit
+    return False, ""
+
+
+def _train_loss_nonfinite(trainer) -> bool:
+    if trainer.tloss is None:
+        return False
+    try:
+        vals = trainer.tloss.tolist() if hasattr(trainer.tloss, "tolist") else trainer.tloss
+        for v in vals:
+            fv = float(v)
+            if fv != fv or abs(fv) == float("inf"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _nan_recovery_hint(params: dict) -> str:
+    lines = [
+        "训练出现 NaN/Inf，常见处理：",
+        "  1. 换用干净预训练权重（如 weights/yolo26n.pt），勿用已损坏的 runs/.../best.pt",
+        "  2. 关闭 AMP 混合精度",
+        "  3. 降低 lr0（微调建议 0.001，勿用 0.01）",
+        "  4. 调度改 Linear，lrf 设 0.01",
+        "  5. 取消 exist_ok，删除 runs/detect/<name> 后重新训练",
+    ]
+    if params.get("weights_file") and "runs" in str(params.get("weights_file", "")).replace("\\", "/"):
+        lines.insert(1, "  · 当前权重来自 runs/ 目录，若上次训练 EMA 失败，该文件可能已损坏")
+    return "\n".join(lines)
+
+
 class _SuppressUltralyticsTqdm:
     """Deprecated no-op kept for compatibility."""
 
@@ -360,7 +445,14 @@ class _SuppressUltralyticsTqdm:
         return False
 
 
-def _make_epoch_summary_callback(log: LogFn, training_started: threading.Event):
+def _make_epoch_summary_callback(
+    log: LogFn,
+    training_started: threading.Event,
+    train_params: Optional[dict] = None,
+):
+    train_params = train_params or {}
+    _nan_epochs = {"count": 0}
+
     def _on_fit_epoch_end(trainer) -> None:
         training_started.set()
         import sys
@@ -412,6 +504,14 @@ def _make_epoch_summary_callback(log: LogFn, training_started: threading.Event):
 
         _log_ts(" | ".join(parts), log)
 
+        if _train_loss_nonfinite(trainer):
+            _nan_epochs["count"] += 1
+            _log_ts("WARNING: 训练 loss 为 NaN/Inf，EMA 权重无法保存", log)
+            log(_nan_recovery_hint(train_params))
+            if _nan_epochs["count"] >= 2:
+                _log_ts("ERROR: 连续 NaN，已自动停止训练", log)
+                trainer.stop = True
+
     return _on_fit_epoch_end
 
 
@@ -458,6 +558,13 @@ def normalize_train_kwargs(raw: dict, model=None) -> dict:
     for k in _AUG_KEYS:
         if k in kw and kw[k] == "":
             kw.pop(k)
+
+    schedule = str(kw.pop("lr_schedule", "") or "").lower()
+    kw.pop("lr_cos_tmax", None)
+    if schedule:
+        kw["cos_lr"] = resolve_cos_lr(schedule)
+    elif "cos_lr" not in kw:
+        kw["cos_lr"] = False
 
     dev = kw.get("device", "auto")
     if dev == "auto":
@@ -588,6 +695,21 @@ def run_training(
         if resolved != weights:
             _log_ts(f"resolved weights: {resolved}", log)
 
+        bad, reason = checkpoint_has_nonfinite(resolved)
+        if bad:
+            _log_ts(f"ERROR: 权重含非有限值 ({reason}): {resolved}", log)
+            log(_nan_recovery_hint(params))
+            return "error"
+
+        wf = str(params.get("weights_file", "")).replace("\\", "/")
+        lr0 = float(params.get("lr0", 0.01))
+        if "/runs/" in wf and lr0 >= 0.005 and not params.get("resume"):
+            _log_ts(
+                "WARNING: 使用 runs/ 下 checkpoint 微调且 lr0 较高，"
+                "若 loss 变 NaN 请换 yolo26n.pt 并将 lr0 降至 0.001",
+                log,
+            )
+
         if params.get("amp", True):
             ensure_amp_probe_weights(wdir, log=log)
         else:
@@ -607,6 +729,11 @@ def run_training(
             log,
         )
         _log_ts(f"数据集: {kw.get('data')}", log)
+        sched = str(params.get("lr_schedule", "linear") or "linear")
+        _log_ts(
+            f"LR: lr0={params.get('lr0')} lrf={params.get('lrf')} schedule={sched} amp={kw.get('amp')}",
+            log,
+        )
         if kw.get("batch") == -1:
             _log_ts("batch=-1：AMP 检测后将进行显存探测(auto-batch)，可能较慢", log)
         _log_ts(
@@ -632,7 +759,15 @@ def run_training(
 
         model.add_callback(
             "on_fit_epoch_end",
-            _make_epoch_summary_callback(log, training_started),
+            _make_epoch_summary_callback(log, training_started, params),
+        )
+        schedule = str(params.get("lr_schedule", "linear") or "linear").lower()
+        install_lr_schedule_hooks(
+            model,
+            schedule=schedule,
+            lrf=float(params.get("lrf", 0.01)),
+            cos_tmax_frac=float(params.get("lr_cos_tmax", 0.75)),
+            log=log,
         )
         try:
             _log_ts(">>> 调用 model.train() >>>", log)

@@ -39,15 +39,16 @@ from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
     QPushButton, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
-    QFileDialog, QMessageBox,
+    QFileDialog, QMessageBox, QAbstractSpinBox,
 )
 from ultralytics import YOLO
 
 from libs.repo_paths import repo_root, configs_dir
+from libs.lr_schedules import SCHEDULE_CHOICES
 from libs.yolo_weights import resolve_yolo_checkpoint
 from libs.fvt_train_runner import (
     run_training, audit_cuda_environment, format_cuda_audit_message,
-    get_last_exported_weight,
+    get_last_exported_weight, checkpoint_has_nonfinite,
 )
 from libs.train_monitor import (
     TensorBoardServer, ResultsWatcher, collect_metrics,
@@ -379,6 +380,55 @@ class _BasicTab(QWidget):
             self.project_edit.setText(d["project"])
 
 
+class _SciFloatEdit(QLineEdit):
+    """可自由输入的小数字段（支持 0.005、1e-3）；读取时再校验范围。"""
+
+    def __init__(self, value: float = 0.001, minimum: float = 1e-7, maximum: float = 1.0, parent=None):
+        super().__init__(parent)
+        self._minimum = minimum
+        self._maximum = maximum
+        self.setAlignment(Qt.AlignRight)
+        self.setValue(value)
+
+    def setValue(self, value) -> None:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            v = self._minimum
+        v = max(self._minimum, min(self._maximum, v))
+        self.setText(f"{v:g}")
+
+    def value(self) -> float:
+        text = self.text().strip().replace(",", "")
+        if not text:
+            return self._minimum
+        try:
+            v = float(text)
+        except ValueError:
+            return self._minimum
+        return max(self._minimum, min(self._maximum, v))
+
+
+def _tune_double_spin(
+    minimum: float,
+    maximum: float,
+    value: float,
+    decimals: int,
+    step: float,
+) -> QDoubleSpinBox:
+    """DoubleSpinBox that allows typing full number before committing."""
+    spin = QDoubleSpinBox()
+    spin.setRange(minimum, maximum)
+    spin.setDecimals(decimals)
+    spin.setSingleStep(step)
+    spin.setValue(value)
+    spin.setKeyboardTracking(False)
+    spin.setAlignment(Qt.AlignRight)
+    # PyQt5: UpDownArrows (Qt6 renamed to UpDownButtons)
+    spin.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+    return spin
+
+
 class _OptimizerTab(QWidget):
     """优化器参数选项卡。"""
     def __init__(self, parent=None):
@@ -388,74 +438,146 @@ class _OptimizerTab(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
-        gb = QGroupBox("优化器与学习率")
-        fm = QFormLayout()
-
+        # ── 优化器 ──
+        gb_opt = QGroupBox("优化器")
+        fm_opt = QFormLayout()
         self.optimizer_combo = QComboBox()
-        self.optimizer_combo.addItems(["AdamW", "SGD", "Adam", "Nadam", "RMSProp"])
+        self.optimizer_combo.addItems(
+            ["AdamW", "SGD", "Adam", "NAdam", "RAdam", "RMSProp", "Adamax", "MuSGD", "auto"]
+        )
+        self.momentum_spin = _tune_double_spin(0.0, 1.0, 0.937, 3, 0.01)
+        self.weight_decay_spin = _tune_double_spin(0.0, 1.0, 0.0005, 6, 0.0001)
+        fm_opt.addRow("Optimizer:", self.optimizer_combo)
+        fm_opt.addRow("Momentum:", self.momentum_spin)
+        fm_opt.addRow("Weight Decay:", self.weight_decay_spin)
+        gb_opt.setLayout(fm_opt)
+        layout.addWidget(gb_opt)
 
-        self.lr0_spin = QDoubleSpinBox()
-        self.lr0_spin.setRange(1e-7, 1.0)
-        self.lr0_spin.setDecimals(6)
-        self.lr0_spin.setValue(0.001)
-        self.lr0_spin.setSingleStep(0.0005)
+        # ── 学习率调度 ──
+        gb_lr = QGroupBox("学习率调度")
+        fm_lr = QFormLayout()
 
-        self.lrf_spin = QDoubleSpinBox()
-        self.lrf_spin.setRange(1e-7, 1.0)
-        self.lrf_spin.setDecimals(6)
-        self.lrf_spin.setValue(0.01)
-        self.lrf_spin.setSingleStep(0.005)
+        self.lr_schedule_combo = QComboBox()
+        for key, label in SCHEDULE_CHOICES:
+            self.lr_schedule_combo.addItem(label, key)
+        self.lr_schedule_combo.setToolTip(
+            "Linear: lr0 → lr0×lrf 线性\n"
+            "Cosine: 全周期余弦降至 lr0×lrf\n"
+            "OneCycleLR: 先升至 lr0 再降至 lr0×lrf（按 epoch 包络）\n"
+            "Truncated Cosine: 前若干 epoch 余弦衰减，之后保持 lr0×lrf"
+        )
 
-        self.momentum_spin = QDoubleSpinBox()
-        self.momentum_spin.setRange(0.0, 1.0)
-        self.momentum_spin.setDecimals(3)
-        self.momentum_spin.setValue(0.937)
-        self.momentum_spin.setSingleStep(0.01)
+        self.lr0_edit = _SciFloatEdit(0.001, 1e-7, 1.0)
+        self.lr0_edit.setToolTip("初始学习率 lr0（AdamW 常用 1e-3 ~ 1e-2）")
 
-        self.weight_decay_spin = QDoubleSpinBox()
-        self.weight_decay_spin.setRange(0.0, 1.0)
-        self.weight_decay_spin.setDecimals(6)
-        self.weight_decay_spin.setValue(0.0005)
-        self.weight_decay_spin.setSingleStep(0.0001)
+        self.lrf_edit = _SciFloatEdit(0.01, 1e-7, 1.0)
+        self.lrf_edit.setToolTip("最低 LR 比例：lr_min = lr0 × lrf")
 
-        self.warmup_epochs_spin = QDoubleSpinBox()
-        self.warmup_epochs_spin.setRange(0.0, 50.0)
-        self.warmup_epochs_spin.setDecimals(1)
-        self.warmup_epochs_spin.setValue(3.0)
-        self.warmup_epochs_spin.setSingleStep(0.5)
+        self.lr_cos_tmax_spin = _tune_double_spin(0.05, 1.0, 0.75, 2, 0.05)
+        self.lr_cos_tmax_spin.setToolTip(
+            "截断余弦：在前 N% 的总 epoch 内完成余弦衰减，其余 epoch 保持 lr0×lrf"
+        )
+        self.lr_cos_tmax_label = QLabel("余弦阶段占比:")
+        self.lr_cos_tmax_row = QWidget()
+        _tmax_row = QHBoxLayout(self.lr_cos_tmax_row)
+        _tmax_row.setContentsMargins(0, 0, 0, 0)
+        _tmax_row.addWidget(self.lr_cos_tmax_spin)
+        _tmax_row.addWidget(QLabel("(占总 epochs)"))
+        _tmax_row.addStretch()
 
-        self.warmup_momentum_spin = QDoubleSpinBox()
-        self.warmup_momentum_spin.setRange(0.0, 1.0)
-        self.warmup_momentum_spin.setDecimals(3)
-        self.warmup_momentum_spin.setValue(0.8)
-        self.warmup_momentum_spin.setSingleStep(0.05)
+        self.final_lr_label = QLabel("")
+        self.final_lr_label.setStyleSheet("color: #555; font-size: 10px;")
+        self._refresh_final_lr_hint()
 
+        fm_lr.addRow("调度方式:", self.lr_schedule_combo)
+        fm_lr.addRow("lr0 (初始):", self.lr0_edit)
+        fm_lr.addRow("lrf (最低比例):", self.lrf_edit)
+        fm_lr.addRow(self.lr_cos_tmax_label, self.lr_cos_tmax_row)
+        fm_lr.addRow("", self.final_lr_label)
+        gb_lr.setLayout(fm_lr)
+        layout.addWidget(gb_lr)
+
+        self.lr0_edit.editingFinished.connect(self._refresh_final_lr_hint)
+        self.lrf_edit.editingFinished.connect(self._refresh_final_lr_hint)
+        self.lr_schedule_combo.currentIndexChanged.connect(self._on_lr_schedule_changed)
+        self.lr_cos_tmax_spin.valueChanged.connect(self._refresh_final_lr_hint)
+        self._on_lr_schedule_changed()
+
+        # ── Warmup ──
+        gb_warm = QGroupBox("Warmup 预热")
+        fm_warm = QFormLayout()
+        self.warmup_epochs_spin = _tune_double_spin(0.0, 50.0, 3.0, 1, 0.5)
+        self.warmup_momentum_spin = _tune_double_spin(0.0, 1.0, 0.8, 3, 0.05)
+        self.warmup_bias_lr_edit = _SciFloatEdit(0.1, 1e-7, 1.0)
+        self.warmup_bias_lr_edit.setToolTip("warmup 阶段 bias 参数使用的学习率（Ultralytics warmup_bias_lr）")
+        fm_warm.addRow("Warmup Epochs:", self.warmup_epochs_spin)
+        fm_warm.addRow("Warmup Momentum:", self.warmup_momentum_spin)
+        fm_warm.addRow("Warmup Bias LR:", self.warmup_bias_lr_edit)
+        gb_warm.setLayout(fm_warm)
+        layout.addWidget(gb_warm)
+
+        # ── 早停 ──
+        gb_other = QGroupBox("早停")
+        fm_other = QFormLayout()
         self.patience_spin = QSpinBox()
         self.patience_spin.setRange(0, 10000)
         self.patience_spin.setValue(15)
         self.patience_spin.setSpecialValueText("off")
+        self.patience_spin.setKeyboardTracking(False)
+        fm_other.addRow("Patience:", self.patience_spin)
+        gb_other.setLayout(fm_other)
+        layout.addWidget(gb_other)
 
-        fm.addRow("Optimizer:", self.optimizer_combo)
-        fm.addRow("lr0:", self.lr0_spin)
-        fm.addRow("lrf (final lr):", self.lrf_spin)
-        fm.addRow("Momentum:", self.momentum_spin)
-        fm.addRow("Weight Decay:", self.weight_decay_spin)
-        fm.addRow("Warmup Epochs:", self.warmup_epochs_spin)
-        fm.addRow("Warmup Momentum:", self.warmup_momentum_spin)
-        fm.addRow("Patience:", self.patience_spin)
-        gb.setLayout(fm)
-        layout.addWidget(gb)
+        tip = QLabel(
+            "说明：lrf 为比例，lr_min = lr0×lrf。"
+            "OneCycleLR 在 epoch 粒度先升至 lr0 再降至 lr_min；"
+            "截断余弦可在前 N% epoch 余弦衰减后保持 lr_min。"
+        )
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: #666; font-size: 10px;")
+        layout.addWidget(tip)
         layout.addStretch()
 
+    def _on_lr_schedule_changed(self):
+        sched = self.lr_schedule_combo.currentData() or "linear"
+        show_tmax = sched == "truncated_cosine"
+        self.lr_cos_tmax_label.setVisible(show_tmax)
+        self.lr_cos_tmax_row.setVisible(show_tmax)
+        self._refresh_final_lr_hint()
+
+    def _refresh_final_lr_hint(self):
+        lr0 = self.lr0_edit.value()
+        lrf = self.lrf_edit.value()
+        sched = self.lr_schedule_combo.currentData() or "linear"
+        lr_min = lr0 * lrf
+        if sched == "onecycle":
+            hint = f"→ OneCycle: lr0×lrf={lr_min:.6g} ↑ lr0={lr0:g} ↓ lr0×lrf={lr_min:.6g}"
+        elif sched == "truncated_cosine":
+            pct = self.lr_cos_tmax_spin.value()
+            hint = (
+                f"→ 前 {pct:.0%} epochs 余弦降至 lr0×lrf={lr_min:.6g}，"
+                f"之后保持 {lr_min:.6g}"
+            )
+        elif sched == "cosine":
+            hint = f"→ 余弦衰减至 lr0×lrf = {lr0:g} × {lrf:g} = {lr_min:.6g}"
+        else:
+            hint = f"→ 线性衰减至 lr0×lrf = {lr0:g} × {lrf:g} = {lr_min:.6g}"
+        self.final_lr_label.setText(hint)
+
     def get_values(self) -> dict:
+        sched = self.lr_schedule_combo.currentData() or "linear"
         return {
             "optimizer": self.optimizer_combo.currentText(),
-            "lr0": self.lr0_spin.value(),
-            "lrf": self.lrf_spin.value(),
+            "lr0": self.lr0_edit.value(),
+            "lrf": self.lrf_edit.value(),
+            "lr_schedule": sched,
+            "lr_cos_tmax": self.lr_cos_tmax_spin.value(),
+            "cos_lr": sched == "cosine",
             "momentum": self.momentum_spin.value(),
             "weight_decay": self.weight_decay_spin.value(),
             "warmup_epochs": self.warmup_epochs_spin.value(),
             "warmup_momentum": self.warmup_momentum_spin.value(),
+            "warmup_bias_lr": self.warmup_bias_lr_edit.value(),
             "patience": self.patience_spin.value(),
         }
 
@@ -465,9 +587,21 @@ class _OptimizerTab(QWidget):
             if idx >= 0:
                 self.optimizer_combo.setCurrentIndex(idx)
         if d.get("lr0") is not None:
-            self.lr0_spin.setValue(float(d["lr0"]))
+            self.lr0_edit.setValue(d["lr0"])
         if d.get("lrf") is not None:
-            self.lrf_spin.setValue(float(d["lrf"]))
+            self.lrf_edit.setValue(d["lrf"])
+        sched = d.get("lr_schedule")
+        if sched:
+            idx = self.lr_schedule_combo.findData(str(sched).lower())
+            if idx >= 0:
+                self.lr_schedule_combo.setCurrentIndex(idx)
+        elif d.get("cos_lr") is not None:
+            want_cos = str(d["cos_lr"]).lower() in ("1", "true", "yes")
+            idx = self.lr_schedule_combo.findData("cosine" if want_cos else "linear")
+            if idx >= 0:
+                self.lr_schedule_combo.setCurrentIndex(idx)
+        if d.get("lr_cos_tmax") is not None:
+            self.lr_cos_tmax_spin.setValue(float(d["lr_cos_tmax"]))
         if d.get("momentum") is not None:
             self.momentum_spin.setValue(float(d["momentum"]))
         if d.get("weight_decay") is not None:
@@ -476,8 +610,11 @@ class _OptimizerTab(QWidget):
             self.warmup_epochs_spin.setValue(float(d["warmup_epochs"]))
         if d.get("warmup_momentum") is not None:
             self.warmup_momentum_spin.setValue(float(d["warmup_momentum"]))
+        if d.get("warmup_bias_lr") is not None:
+            self.warmup_bias_lr_edit.setValue(d["warmup_bias_lr"])
         if d.get("patience") is not None:
             self.patience_spin.setValue(int(d["patience"]))
+        self._on_lr_schedule_changed()
 
 
 class _HardwareTab(QWidget):
@@ -802,6 +939,37 @@ class TabbedTrainGUI(QWidget):
                 if reply != QMessageBox.Ok:
                     return
 
+        weights = params.get("weights_file", "")
+        bad, reason = checkpoint_has_nonfinite(weights)
+        if bad:
+            QMessageBox.critical(
+                self,
+                "权重文件损坏",
+                f"权重含 NaN/Inf（{reason}）。\n\n"
+                "请改用干净预训练权重（如 weights/yolo26n.pt），"
+                "或删除损坏的 runs/.../weights/*.pt 后重新训练。",
+            )
+            return
+
+        wf = str(weights).replace("\\", "/")
+        if (
+            "/runs/" in wf
+            and float(params.get("lr0", 0) or 0) >= 0.005
+            and params.get("amp", True)
+        ):
+            reply = QMessageBox.warning(
+                self,
+                "微调易 NaN",
+                "当前：runs/ 下 checkpoint + lr0≥0.005 + AMP 开启，"
+                "训练易出现 loss NaN。\n\n"
+                "建议：lr0 改为 0.001、关闭 AMP，或换 weights/yolo26n.pt。\n\n"
+                "仍按当前参数开始？",
+                QMessageBox.Ok | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if reply != QMessageBox.Ok:
+                return
+
         if not self._check_cuda_before_train(params):
             return
 
@@ -1085,7 +1253,7 @@ class TabbedTrainGUI(QWidget):
         "copy_paste", "erasing",
     )
     _BOOL_INI_KEYS = (
-        "pretrained", "resume", "exist_ok", "val", "plots", "amp", "tune_enabled",
+        "pretrained", "resume", "exist_ok", "val", "plots", "amp", "tune_enabled", "cos_lr",
     )
 
     def _session_config_path(self) -> str:
@@ -1136,10 +1304,14 @@ class TabbedTrainGUI(QWidget):
             "optimizer": s.get("optimizer", "AdamW"),
             "lr0": s.get("lr0", "0.001"),
             "lrf": s.get("lrf", "0.01"),
+            "cos_lr": s.get("cos_lr", "false"),
+            "lr_schedule": s.get("lr_schedule", "linear"),
+            "lr_cos_tmax": s.get("lr_cos_tmax", "0.75"),
             "momentum": s.get("momentum", "0.937"),
             "weight_decay": s.get("weight_decay", "0.0005"),
             "warmup_epochs": s.get("warmup_epochs", "3.0"),
             "warmup_momentum": s.get("warmup_momentum", "0.8"),
+            "warmup_bias_lr": s.get("warmup_bias_lr", "0.1"),
             "patience": s.get("patience", "15"),
         })
         aug_vals = {k: s.get(k) for k in self._AUG_SAVE_KEYS if s.get(k) is not None}
@@ -1182,10 +1354,13 @@ class TabbedTrainGUI(QWidget):
             "optimizer": str(params.get("optimizer", "AdamW")),
             "lr0": str(params.get("lr0", 0.001)),
             "lrf": str(params.get("lrf", 0.01)),
+            "lr_schedule": str(params.get("lr_schedule", "linear")),
+            "lr_cos_tmax": str(params.get("lr_cos_tmax", 0.75)),
             "momentum": str(params.get("momentum", 0.937)),
             "weight_decay": str(params.get("weight_decay", 0.0005)),
             "warmup_epochs": str(params.get("warmup_epochs", 3.0)),
             "warmup_momentum": str(params.get("warmup_momentum", 0.8)),
+            "warmup_bias_lr": str(params.get("warmup_bias_lr", 0.1)),
             "patience": str(params.get("patience", 15)),
             "device": str(params.get("device", "0")),
             "workers": str(params.get("workers", 0)),
