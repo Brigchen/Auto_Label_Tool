@@ -801,7 +801,8 @@ class Canvas(QWidget):
             v_delta = delta.y()
 
         mods = ev.modifiers()
-        if Qt.ControlModifier == int(mods) and v_delta:
+        shift = bool(int(mods) & int(Qt.ShiftModifier))
+        if v_delta and not shift:
             self.zoomRequest.emit(v_delta)
         else:
             v_delta and self.scrollRequest.emit(v_delta, Qt.Vertical)

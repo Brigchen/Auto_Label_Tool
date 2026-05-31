@@ -8,9 +8,9 @@
 
 | 模块 | 说明 |
 |------|------|
-| **ALT 标注主程序**（`src/ALT.py`） | VOC / YOLO 格式、关键点、自动标注、视频追踪标注、放大镜、类别筛选与统计、标注校正、与训练流程衔接等。 |
+| **ALT 标注主程序**（`src/ALT.py`） | VOC / YOLO 格式、关键点、自动标注、视频追踪标注、放大镜、类别筛选与统计、标注校正；**Train Console** 启动完整训练 GUI；CLI **`--datasets`** 自动打开数据集目录。 |
 | **FishVision**（`src/FishVision_GUI.py`） | 视频或 RTSP 预览、检测，可选跟踪与画面增强。 |
-| **FishVision 训练界面**（`src/FishVision_Train_GUI.py`） | 五选项卡训练控制台：基本参数、优化器、数据增强、硬件/高级、自动调参；实时单行进度（s/it、ETA）、每 epoch 指标摘要；退出自动保存参数；TensorBoard / 终端训练；训练结束自动复制 `best.pt` 到 `weights/`。 |
+| **FishVision 训练界面**（`src/FishVision_Train_GUI.py`） | 五选项卡训练控制台：基本参数、优化器、数据增强、硬件/高级、自动调参；实时单行进度（s/it、ETA）、每 epoch 指标摘要；**测试报告**（train/val/test、随机抽样、低分样本导出）；**打开 ALT** 改标注；退出自动保存参数；TensorBoard / 终端训练；训练结束自动复制 `best.pt` 到 `weights/`。 |
 
 共享逻辑在 `libs/`（IO、设置、YOLO/VOC、导出、叠加检查等）；应用配置在 `configs/`；**数据**建议放在 `datasets/`、**权重**放在 `weights/`（仓库内已有占位说明，大文件默认不提交）。
 
@@ -37,8 +37,10 @@ py -3 -m pip install -r requirements.txt
 
 ```bat
 python src\ALT.py
+python src\ALT.py --datasets H:/path/to/dataset --split val
 python src\FishVision_GUI.py
 python src\FishVision_Train_GUI.py
+python src\FishVision_Train_GUI.py --data H:/path/to/data.yaml
 ```
 
 - `Auto_Label_Tool.bat` → 启动 ALT  
@@ -56,9 +58,16 @@ python src\FishVision_Train_GUI.py
 5. **训练（FishVision Trainer）**  
    - 在 GUI 中配置 data yaml、权重、batch/imgsz/workers/cache/AMP 等，点击「开始训练」。  
    - 底部状态栏显示实时 batch 进度；日志区每 epoch 输出一行验证指标。  
+   - **「测试报告」**：对 train/val/test 或自定义目录评估，生成 HTML；可导出全部低分样本（`images/<划分>/`）并在 ALT 中改标注。  
+   - **「打开 ALT」**：从训练界面启动标注工具。  
    - 「终端运行」在独立 cmd 窗口执行，便于查看完整 Ultralytics 输出。  
    - 「TensorBoard」指向 `runs/`（实际 run 在 `runs/detect/<name>` 等子目录）。  
    - 大显存 + 大数据集建议：`workers=4`、`cache=disk` 或 `ram`；RTX 50 系列需 PyTorch 2.x + cu128。
+
+6. **标注（ALT）**  
+   - 菜单 **Annotate-Tools → Train Console** 打开 FishVision 训练控制台。  
+   - 滚轮缩放图像，**Shift+滚轮** 平移。  
+   - 命令行：`Auto_Label_Tool.bat --datasets <数据集根目录> --split test`。
 
 ---
 
@@ -75,8 +84,10 @@ python src\FishVision_Train_GUI.py
 |------|------|
 | `src/ALT.py` | 主标注程序 |
 | `src/FishVision_GUI.py` | 视频 / RTSP 工具 |
-| `src/FishVision_Train_GUI.py` | 训练图形界面（选项卡控制台） |
+| `src/FishVision_Train_GUI.py` | 训练图形界面（选项卡控制台 + 测试报告） |
 | `libs/fvt_train_runner.py` | 训练执行与进度/导出逻辑 |
+| `libs/test_report.py` | 测试集 HTML 报告与低分样本导出 |
+| `libs/alt_launcher.py` / `libs/fvt_launcher.py` | ALT / Trainer 子进程启动 |
 | `libs/train_monitor.py` | TensorBoard、results.csv 监控 |
 | `libs/` | 公共库与资源加载 |
 | `configs/` | 应用 ini / 本地状态 |

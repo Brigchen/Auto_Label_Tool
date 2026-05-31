@@ -17,14 +17,14 @@ import subprocess
 import sys
 import threading
 import time as _time
+from pathlib import Path
+from typing import Optional
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# Ultralytics default deterministic=True needs this before torch loads
-if not os.environ.get("CUBLAS_WORKSPACE_CONFIG"):
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+import libs.env_bootstrap  # noqa: F401,E402  # before torch
 
 try:
     from ultralytics.utils import SETTINGS
@@ -39,7 +39,7 @@ from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
     QPushButton, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
-    QFileDialog, QMessageBox, QAbstractSpinBox,
+    QFileDialog, QMessageBox, QAbstractSpinBox, QDialog, QDialogButtonBox,
 )
 from ultralytics import YOLO
 
@@ -48,7 +48,7 @@ from libs.lr_schedules import SCHEDULE_CHOICES
 from libs.yolo_weights import resolve_yolo_checkpoint
 from libs.fvt_train_runner import (
     run_training, audit_cuda_environment, format_cuda_audit_message,
-    get_last_exported_weight, checkpoint_has_nonfinite,
+    get_last_exported_weight, checkpoint_has_nonfinite, restore_logging_streams,
 )
 from libs.train_monitor import (
     TensorBoardServer, ResultsWatcher, collect_metrics,
@@ -56,6 +56,8 @@ from libs.train_monitor import (
 )
 from libs.train_augment_panel import AugmentPanel
 from libs.hyperparam_search import HyperparamSearchPanel
+from libs.test_report import run_test_report, inspect_dataset_directory, format_inspect_report
+from libs.alt_launcher import launch_alt
 
 
 # ══════════════════════════════════════════════════════════════
@@ -100,6 +102,15 @@ class TrainingWorker(QThread):
             def isatty(self):
                 return False
 
+            def close(self):
+                try:
+                    self.flush()
+                except Exception:
+                    pass
+                close_fn = getattr(self._orig, "close", None)
+                if callable(close_fn):
+                    close_fn()
+
         sys.stdout = _QueueWriter(self.log_queue, old_stdout)
         sys.stderr = _QueueWriter(self.log_queue, old_stderr)
 
@@ -136,6 +147,7 @@ class TrainingWorker(QThread):
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
+            restore_logging_streams(old_stdout)
 
     def _log_ts(self, msg: str):
         """带时间戳的日志。"""
@@ -171,6 +183,284 @@ class TrainingWorker(QThread):
             optimizer=kw.get("optimizer", "AdamW"),
             save_dir=os.path.join(repo_root(), "runs", "tune"),
         )
+
+
+class TestReportWorker(QThread):
+    """后台生成测试集 HTML 报告与低分样本图。"""
+
+    log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, int, str)
+    finished_signal = pyqtSignal(str, str, str)  # status, html_path, export_dataset_dir
+
+    def __init__(self, opts: dict, parent=None):
+        super().__init__(parent)
+        self.opts = opts
+
+    def run(self):
+        try:
+            def _log(msg: str) -> None:
+                self.log_signal.emit(msg)
+
+            def _prog(cur: int, total: int, name: str) -> None:
+                self.progress_signal.emit(cur, total, name)
+
+            html_path, export_dataset_dir = run_test_report(
+                weights=self.opts["weights"],
+                data_yaml=self.opts.get("data_yaml", ""),
+                out_dir=self.opts["out_dir"],
+                source_mode=self.opts.get("source_mode", "yaml"),
+                dataset_dir=self.opts.get("dataset_dir", ""),
+                split=self.opts.get("split", "test"),
+                conf=float(self.opts.get("conf", 0.25)),
+                iou_match=float(self.opts.get("iou_match", 0.5)),
+                sample_limit=int(self.opts.get("sample_limit", 0)),
+                device=str(self.opts.get("device", "0")),
+                run_ultralytics_val=bool(self.opts.get("run_ultralytics_val", True)),
+                export_dataset=bool(self.opts.get("export_dataset", False)),
+                export_dataset_dir=self.opts.get("export_dataset_dir") or None,
+                log=_log,
+                progress=_prog,
+            )
+            self.finished_signal.emit("finished", html_path, export_dataset_dir or "")
+        except Exception as exc:
+            import traceback
+            self.log_signal.emit(f"[ERROR] {exc}")
+            self.log_signal.emit(traceback.format_exc())
+            self.finished_signal.emit("error", "", "")
+
+
+class _TestReportDialog(QDialog):
+    """测试报告参数对话框。"""
+
+    _SPLIT_ITEMS = (
+        ("test（测试集）", "test"),
+        ("val（验证集）", "val"),
+        ("train（训练集）", "train"),
+    )
+
+    def __init__(self, parent, defaults: dict):
+        super().__init__(parent)
+        self.setWindowTitle("测试集诊断报告")
+        self.setMinimumWidth(520)
+        self._dir_inspect = None
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.weights_edit = QLineEdit(defaults.get("weights", ""))
+        w_btn = QPushButton("浏览...")
+        w_btn.clicked.connect(self._browse_weights)
+        w_row = QHBoxLayout()
+        w_row.addWidget(self.weights_edit)
+        w_row.addWidget(w_btn)
+
+        self.out_edit = QLineEdit(defaults.get("out_dir", ""))
+        o_btn = QPushButton("浏览...")
+        o_btn.clicked.connect(self._browse_out)
+        o_row = QHBoxLayout()
+        o_row.addWidget(self.out_edit)
+        o_row.addWidget(o_btn)
+
+        self.source_combo = QComboBox()
+        self.source_combo.addItem("data yaml 划分", "yaml")
+        self.source_combo.addItem("指定数据集目录", "dir")
+        idx = self.source_combo.findData(defaults.get("source_mode", "yaml"))
+        if idx >= 0:
+            self.source_combo.setCurrentIndex(idx)
+
+        self.dataset_dir_edit = QLineEdit(defaults.get("dataset_dir", ""))
+        self.dataset_dir_edit.setPlaceholderText("数据集根目录或 images/train|val|test")
+        self.dataset_status = QLabel("未检查")
+        self.dataset_status.setWordWrap(True)
+        self.dataset_status.setStyleSheet("color:#666;font-size:10px;")
+        dd_btn = QPushButton("浏览...")
+        dd_btn.clicked.connect(self._browse_dataset_dir)
+        self._check_dir_btn = QPushButton("检查结构")
+        self._check_dir_btn.clicked.connect(self._check_dataset_dir)
+        dd_row = QHBoxLayout()
+        dd_row.addWidget(self.dataset_dir_edit)
+        dd_row.addWidget(dd_btn)
+        dd_row.addWidget(self._check_dir_btn)
+        self._dataset_dir_widgets = (self.dataset_dir_edit, dd_btn, self._check_dir_btn, self.dataset_status)
+
+        self.split_combo = QComboBox()
+        self._reload_split_combo(defaults.get("split", "test"))
+
+        self.conf_spin = QDoubleSpinBox()
+        self.conf_spin.setRange(0.01, 1.0)
+        self.conf_spin.setSingleStep(0.05)
+        self.conf_spin.setValue(float(defaults.get("conf", 0.25)))
+
+        self.iou_spin = QDoubleSpinBox()
+        self.iou_spin.setRange(0.1, 0.95)
+        self.iou_spin.setSingleStep(0.05)
+        self.iou_spin.setValue(float(defaults.get("iou_match", 0.5)))
+
+        self.sample_spin = QSpinBox()
+        self.sample_spin.setRange(0, 999999)
+        self.sample_spin.setSpecialValueText("全部")
+        self.sample_spin.setValue(int(defaults.get("sample_limit", 0)))
+        self.sample_spin.setToolTip("0 = 评估该划分下全部图像；>0 则随机抽取指定数量")
+
+        self.val_check = QCheckBox("运行 Ultralytics 整集验证（较慢，可获 mAP 汇总）")
+        self.val_check.setChecked(bool(defaults.get("run_ultralytics_val", True)))
+
+        self.export_ds_check = QCheckBox("")
+        self.export_ds_check.setChecked(bool(defaults.get("export_dataset", False)))
+        self.export_ds_edit = QLineEdit(defaults.get("export_dataset_dir", ""))
+        self.export_ds_edit.setPlaceholderText("留空则使用 报告目录/low_score_dataset")
+        ds_btn = QPushButton("浏览...")
+        ds_btn.clicked.connect(self._browse_export_ds)
+        ds_row = QHBoxLayout()
+        ds_row.addWidget(self.export_ds_edit)
+        ds_row.addWidget(ds_btn)
+        self.export_ds_check.toggled.connect(self.export_ds_edit.setEnabled)
+        self.export_ds_check.toggled.connect(ds_btn.setEnabled)
+        enabled = self.export_ds_check.isChecked()
+        self.export_ds_edit.setEnabled(enabled)
+        ds_btn.setEnabled(enabled)
+
+        form.addRow("权重 (best.pt):", w_row)
+        form.addRow("输出目录:", o_row)
+        form.addRow("数据来源:", self.source_combo)
+        form.addRow("数据集目录:", dd_row)
+        form.addRow("", self.dataset_status)
+        form.addRow("数据划分:", self.split_combo)
+        form.addRow("置信度 conf:", self.conf_spin)
+        form.addRow("匹配 IoU:", self.iou_spin)
+        form.addRow("测试图片数量:", self.sample_spin)
+        form.addRow("", self.val_check)
+        form.addRow("", self.export_ds_check)
+        form.addRow("数据集导出目录:", ds_row)
+        layout.addLayout(form)
+
+        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
+        self.split_combo.currentIndexChanged.connect(self._update_export_label)
+        self._update_export_label()
+        self._on_source_changed()
+
+        tip = QLabel(
+            "yaml 模式：按界面 data yaml 的 train/val/test 划分评估。\n"
+            "目录模式：选择数据集根目录或 images/<split>，自动检查 YOLO 结构。\n"
+            "默认评估全部图像；低分判定为 F1<1，导出时全部低分样本写入 images/<划分>/。"
+        )
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#666;font-size:10px;")
+        layout.addWidget(tip)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _reload_split_combo(self, select: str = "test", extra_splits: Optional[list] = None):
+        self.split_combo.clear()
+        splits = extra_splits or [k for _, k in self._SPLIT_ITEMS]
+        labels = {k: lbl for lbl, k in self._SPLIT_ITEMS}
+        for sp in splits:
+            label = labels.get(sp, sp)
+            if sp == "all":
+                label = "全部 (images/)"
+            self.split_combo.addItem(label, sp)
+        idx = self.split_combo.findData(select)
+        if idx >= 0:
+            self.split_combo.setCurrentIndex(idx)
+
+    def _update_export_label(self):
+        sp = self.split_combo.currentData() or "test"
+        self.export_ds_check.setText(
+            f"导出全部低分样本（F1<1 → images/{sp} + labels/{sp}，不限数量）"
+        )
+
+    def _on_source_changed(self):
+        is_dir = self.source_combo.currentData() == "dir"
+        for w in getattr(self, "_dataset_dir_widgets", ()):
+            w.setEnabled(is_dir)
+        if is_dir and self._dir_inspect and self._dir_inspect.splits_found:
+            self._reload_split_combo(self.split_combo.currentData() or "test", self._dir_inspect.splits_found)
+        elif not is_dir:
+            self._reload_split_combo(self.split_combo.currentData() or "test")
+            self.dataset_status.setText("yaml 模式：使用界面「基本参数」中的 data yaml")
+        if is_dir:
+            self.val_check.setToolTip("目录模式需含 data.yaml 才可运行 Ultralytics 整集验证")
+        else:
+            self.val_check.setToolTip("")
+
+    def _browse_dataset_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "选择数据集目录")
+        if path:
+            self.dataset_dir_edit.setText(path)
+            self._check_dataset_dir(show_ok=True)
+
+    def _check_dataset_dir(self, show_ok: bool = False) -> bool:
+        path = self.dataset_dir_edit.text().strip()
+        if not path:
+            self.dataset_status.setText("请先选择数据集目录")
+            return False
+        try:
+            self._dir_inspect = inspect_dataset_directory(path)
+        except Exception as exc:
+            self.dataset_status.setText(f"检查失败: {exc}")
+            return False
+        rep = format_inspect_report(self._dir_inspect)
+        if self._dir_inspect.valid:
+            short = (
+                f"✓ 结构 {self._dir_inspect.structure} | "
+                f"划分 {', '.join(self._dir_inspect.splits_found)} | "
+                f"图 {self._dir_inspect.image_count} 标注 {self._dir_inspect.label_count}"
+            )
+            self.dataset_status.setText(short)
+            if self.source_combo.currentData() == "dir":
+                pick = self.split_combo.currentData()
+                if pick not in self._dir_inspect.splits_found:
+                    pick = self._dir_inspect.splits_found[0]
+                self._reload_split_combo(pick, self._dir_inspect.splits_found)
+            if show_ok:
+                QMessageBox.information(self, "数据集检查通过", rep)
+            return True
+        self.dataset_status.setText("✗ " + (self._dir_inspect.issues[0] if self._dir_inspect.issues else "结构不符合要求"))
+        QMessageBox.warning(self, "数据集结构问题", rep)
+        return False
+
+    def _on_accept(self):
+        if self.source_combo.currentData() == "dir":
+            if not self.dataset_dir_edit.text().strip():
+                QMessageBox.warning(self, "参数错误", "请指定数据集目录")
+                return
+            if not self._check_dataset_dir(show_ok=False):
+                return
+        self.accept()
+
+    def _browse_weights(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择权重", os.path.join(repo_root(), "runs"), "Weights (*.pt)"
+        )
+        if path:
+            self.weights_edit.setText(path)
+
+    def _browse_out(self):
+        path = QFileDialog.getExistingDirectory(self, "选择报告输出目录")
+        if path:
+            self.out_edit.setText(path)
+
+    def _browse_export_ds(self):
+        path = QFileDialog.getExistingDirectory(self, "选择低分样本数据集导出目录")
+        if path:
+            self.export_ds_edit.setText(path)
+
+    def get_options(self) -> dict:
+        return {
+            "weights": self.weights_edit.text().strip(),
+            "out_dir": self.out_edit.text().strip(),
+            "source_mode": self.source_combo.currentData(),
+            "dataset_dir": self.dataset_dir_edit.text().strip(),
+            "split": self.split_combo.currentData(),
+            "conf": self.conf_spin.value(),
+            "iou_match": self.iou_spin.value(),
+            "sample_limit": self.sample_spin.value(),
+            "run_ultralytics_val": self.val_check.isChecked(),
+            "export_dataset": self.export_ds_check.isChecked(),
+            "export_dataset_dir": self.export_ds_edit.text().strip(),
+        }
 
 
 # ══════════════════════════════════════════════════════════════
@@ -740,6 +1030,9 @@ class TabbedTrainGUI(QWidget):
     def __init__(self):
         super().__init__()
         self._worker: TrainingWorker = None
+        self._test_worker: TestReportWorker = None
+        self._last_report_html: str = ""
+        self._last_report_split: str = "test"
         self._tensorboard = TensorBoardServer()
         self._watcher: ResultsWatcher = None
         self._current_run_dir: str = ""  # 最新训练的输出目录
@@ -871,8 +1164,20 @@ class TabbedTrainGUI(QWidget):
         self.terminal_btn.setToolTip("在独立 cmd 窗口执行训练（可看到完整输出）")
         self.terminal_btn.clicked.connect(self._run_in_terminal)
 
+        self.test_report_btn = QPushButton("测试报告")
+        self.test_report_btn.setToolTip(
+            "对 test/val 集评估，生成 HTML 报告；可选导出低分样本数据集供改标注"
+        )
+        self.test_report_btn.clicked.connect(self._run_test_report)
+
+        self.alt_btn = QPushButton("打开 ALT")
+        self.alt_btn.setToolTip("启动 Auto Label Tool；可自动打开当前 data yaml 对应数据集")
+        self.alt_btn.clicked.connect(lambda: self._launch_alt())
+
         btn_layout.addWidget(self.start_btn)
         btn_layout.addWidget(self.stop_btn)
+        btn_layout.addWidget(self.test_report_btn)
+        btn_layout.addWidget(self.alt_btn)
         btn_layout.addWidget(self.terminal_btn)
         btn_layout.addWidget(self.tb_btn)
         btn_layout.addStretch()
@@ -978,6 +1283,7 @@ class TabbedTrainGUI(QWidget):
         # 禁用 UI
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.test_report_btn.setEnabled(False)
         self.tabs.setEnabled(False)
         # 进度由 msg_label 单行刷新；跑马灯 progress_bar 会与 QLabel 争用绘制导致 QPainter 警告
         self.progress_bar.setVisible(False)
@@ -1061,8 +1367,178 @@ class TabbedTrainGUI(QWidget):
                 QMessageBox.information(
                     self, "训练完成", "训练已完成。点击「TensorBoard」查看曲线。"
                 )
+            data_yaml = self.tab_basic.yaml_edit.text().strip()
+            if data_yaml and os.path.isfile(data_yaml) and self._resolve_report_weights():
+                reply = QMessageBox.question(
+                    self,
+                    "生成测试报告",
+                    "是否立即对测试集生成 HTML 诊断报告？\n"
+                    "将导出 F1 最低的样本图（绿框=GT，红框=预测+score）。",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply == QMessageBox.Yes:
+                    self._run_test_report()
         else:
             self.msg_label.setText("训练出错，请查看控制台日志")
+
+    def _resolve_report_weights(self) -> Optional[str]:
+        task = self.tab_basic.task_combo.currentText()
+        project = self.tab_basic.project_edit.text().strip()
+        name = self.tab_basic.name_edit.text().strip() or "train"
+        run_dir = find_latest_run_dir(task, project, name)
+        best = os.path.join(run_dir, "weights", "best.pt")
+        if os.path.isfile(best):
+            return best
+        exported = get_last_exported_weight()
+        if exported and os.path.isfile(exported):
+            return exported
+        w = self.tab_basic.weights_edit.text().strip()
+        return w if w and os.path.isfile(w) else None
+
+    def _default_report_out_dir(self) -> str:
+        task = self.tab_basic.task_combo.currentText()
+        project = self.tab_basic.project_edit.text().strip()
+        name = self.tab_basic.name_edit.text().strip() or "train"
+        run_dir = find_latest_run_dir(task, project, name)
+        stamp = _time.strftime("%Y%m%d_%H%M%S")
+        return os.path.join(run_dir, f"test_report_{stamp}")
+
+    def _resolve_alt_dataset_root(self, preferred: str = "") -> str:
+        """Pick dataset root for ALT (--datasets)."""
+        if preferred and os.path.isdir(preferred):
+            return os.path.abspath(preferred)
+        data_yaml = self.tab_basic.yaml_edit.text().strip()
+        if data_yaml and os.path.isfile(data_yaml):
+            root = str(Path(data_yaml).resolve().parent)
+            reply = QMessageBox.question(
+                self,
+                "打开 ALT",
+                f"使用当前 data yaml 所在数据集？\n{root}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                return root
+        path = QFileDialog.getExistingDirectory(
+            self, "选择 YOLO 数据集根目录", preferred or repo_root())
+        return os.path.abspath(path) if path else ""
+
+    def _launch_alt(self, dataset_root: str = "", split: str = "auto"):
+        try:
+            root = self._resolve_alt_dataset_root(dataset_root)
+            if not root:
+                return
+            launch_alt(root, split=split)
+            self.log_box.setVisible(True)
+            self.log_box.append(f"\n>>> 已启动 ALT → {root} (split={split})\n")
+            self.msg_label.setText(f"已启动 ALT: {root}")
+        except Exception as exc:
+            QMessageBox.warning(self, "启动 ALT 失败", str(exc))
+
+    def _run_test_report(self):
+        if self._test_worker and self._test_worker.isRunning():
+            QMessageBox.information(self, "请稍候", "测试报告正在生成中…")
+            return
+        data_yaml = self.tab_basic.yaml_edit.text().strip()
+        if not data_yaml or not os.path.isfile(data_yaml):
+            # 目录模式可在对话框内单独指定数据集
+            data_yaml = ""
+        weights = self._resolve_report_weights()
+        if not weights:
+            QMessageBox.warning(self, "参数错误", "未找到权重文件（best.pt 或界面权重路径）")
+            return
+        device = self.tab_hardware.device_combo.currentText()
+        defaults = {
+            "weights": weights,
+            "out_dir": self._default_report_out_dir(),
+            "split": "test",
+            "conf": 0.25,
+            "iou_match": 0.5,
+            "sample_limit": 0,
+            "source_mode": "yaml",
+            "dataset_dir": "",
+            "export_dataset": False,
+            "export_dataset_dir": "",
+        }
+        dlg = _TestReportDialog(self, defaults)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        opts = dlg.get_options()
+        if not opts.get("weights") or not os.path.isfile(opts["weights"]):
+            QMessageBox.warning(self, "参数错误", "权重文件无效")
+            return
+        if not opts.get("out_dir"):
+            QMessageBox.warning(self, "参数错误", "请指定输出目录")
+            return
+        if opts.get("source_mode") == "yaml":
+            if not data_yaml or not os.path.isfile(data_yaml):
+                QMessageBox.warning(self, "参数错误", "yaml 模式请先选择有效的 data yaml")
+                return
+        elif not opts.get("dataset_dir"):
+            QMessageBox.warning(self, "参数错误", "目录模式请指定并检查数据集目录")
+            return
+        opts["data_yaml"] = data_yaml
+        opts["device"] = device if device != "auto" else ("0" if torch.cuda.is_available() else "cpu")
+        self._last_report_split = opts.get("split") or "test"
+
+        self.log_box.setVisible(True)
+        self.log_box.append(f"\n>>> 开始生成测试报告 → {opts['out_dir']}\n")
+        self.msg_label.setText("正在生成测试报告…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.start_btn.setEnabled(False)
+        self.test_report_btn.setEnabled(False)
+        self.tabs.setEnabled(False)
+
+        self._test_worker = TestReportWorker(opts)
+        self._test_worker.log_signal.connect(self._on_test_report_log)
+        self._test_worker.progress_signal.connect(self._on_test_report_progress)
+        self._test_worker.finished_signal.connect(self._on_test_report_finished)
+        self._test_worker.start()
+
+    def _on_test_report_log(self, msg: str):
+        self.log_box.moveCursor(QTextCursor.End)
+        self.log_box.insertPlainText(msg + "\n")
+        self.msg_label.setText(msg[:120])
+
+    def _on_test_report_progress(self, cur: int, total: int, name: str):
+        if total > 0:
+            self.progress_bar.setValue(int(cur * 100 / total))
+        self.msg_label.setText(f"测试报告 {cur}/{total}: {name}")
+
+    def _on_test_report_finished(self, status: str, html_path: str, export_dataset_dir: str):
+        self.start_btn.setEnabled(True)
+        self.test_report_btn.setEnabled(True)
+        self.tabs.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        if status == "finished" and html_path:
+            self._last_report_html = html_path
+            self.msg_label.setText(f"测试报告已生成: {html_path}")
+            reply = QMessageBox.question(
+                self,
+                "测试报告完成",
+                f"报告已保存至:\n{html_path}\n\n是否在浏览器中打开？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                import webbrowser
+                webbrowser.open(Path(html_path).as_uri())
+            if export_dataset_dir and os.path.isdir(export_dataset_dir):
+                reply_alt = QMessageBox.question(
+                    self,
+                    "打开 ALT 改标注",
+                    f"低分样本已导出至:\n{export_dataset_dir}\n\n是否启动 ALT 进行改标注？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply_alt == QMessageBox.Yes:
+                    self._launch_alt(export_dataset_dir, split=self._last_report_split)
+        else:
+            self.msg_label.setText("测试报告生成失败，请查看日志")
+            QMessageBox.warning(self, "失败", "测试报告生成失败，请查看日志面板。")
 
     def _on_metrics(self, metrics: dict):
         """ResultsWatcher 回调：更新指标显示。"""
@@ -1094,6 +1570,7 @@ class TabbedTrainGUI(QWidget):
     def _enable_ui(self):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.test_report_btn.setEnabled(True)
         self.tabs.setEnabled(True)
         self.progress_bar.setVisible(False)
         self._log_timer.stop()
@@ -1395,13 +1872,27 @@ class TabbedTrainGUI(QWidget):
 # ══════════════════════════════════════════════════════════════
 
 def main():
+    import argparse
+
     from libs.win_qt_taskbar import load_brand_qicon, set_windows_app_user_model_id
+
+    parser = argparse.ArgumentParser(description="FishVision Trainer")
+    parser.add_argument(
+        "--data", "--data-yaml",
+        dest="data_yaml",
+        default=None,
+        help="Pre-fill data yaml path in the Basic tab",
+    )
+    args = parser.parse_args()
+
     set_windows_app_user_model_id("Brigchen.AutoLabelTool.FishVisionTrain.2")
     app = QApplication(sys.argv)
     icon = load_brand_qicon(repo_root(), "app")
     if not icon.isNull():
         app.setWindowIcon(icon)
     gui = TabbedTrainGUI()
+    if args.data_yaml and os.path.isfile(args.data_yaml):
+        gui.tab_basic.yaml_edit.setText(os.path.abspath(args.data_yaml))
     if not icon.isNull():
         gui.setWindowIcon(icon)
     gui.show()

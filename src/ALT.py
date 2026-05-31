@@ -8,6 +8,7 @@ if _REPO_ROOT not in sys.path:
 from libs.win_dll_search_path import register_repo_libs_dll_path
 
 register_repo_libs_dll_path()
+import libs.env_bootstrap  # noqa: F401,E402
 import natsort, cv2, easygui, json
 import xml.etree.ElementTree as ET
 from copy import deepcopy
@@ -322,9 +323,12 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             print('[ALT][WARN] persist autolabel settings:', e)
 
-    def __init__(self, defaultFilename=None, defaultPrefdefClassFile=None, defaultSaveDir=None):
+    def __init__(self, defaultFilename=None, defaultPrefdefClassFile=None, defaultSaveDir=None,
+                 cli_image_dir=None, cli_label_dir=None):
         super(MainWindow, self).__init__()
         self.setWindowTitle(__appname__)
+        self._cli_image_dir = cli_image_dir
+        self._cli_label_dir = cli_label_dir
         # Load setting in the main thread
         self.settings = Settings()
         self.settings.load()
@@ -567,6 +571,13 @@ class MainWindow(QMainWindow, WindowMixin):
             'Build train/val YOLO dataset from labeled images.',
             enabled=True)
         training_model = action('Train Model', self.training_model, 'Ctrl+9', 'app')
+        open_train_console = action(
+            'Train Console',
+            self.open_train_console,
+            'Ctrl+Shift+T',
+            'app',
+            'Open FishVision training GUI (full hyperparameters, tune, test report).',
+            enabled=True)
 
         folder_info = action('Folder Info', self.show_folder_infor, 'Alt+1', 'help')
         label_info = action('Label Info', self.show_label_info, 'Alt+2', 'help')
@@ -663,8 +674,8 @@ class MainWindow(QMainWindow, WindowMixin):
         zoom.setDefaultWidget(self.zoomWidget)
         self.zoomWidget.setWhatsThis(
             u"Zoom in or out of the image. Also accessible with"
-            " %s and %s from the canvas." % (fmtShortcut("Ctrl+[-+]"),
-                                             fmtShortcut("Ctrl+Wheel")))
+            " %s and mouse wheel from the canvas (Shift+Wheel to scroll)."
+            % fmtShortcut("Ctrl+[-+]"))
         self.zoomWidget.setEnabled(False)
 
         zoomIn = action(getStr('zoomin'), partial(self.addZoom, 10),
@@ -790,7 +801,7 @@ class MainWindow(QMainWindow, WindowMixin):
             load_label_names, None,
             label_pruning, file_pruning, change_label, None,
             choose_autolabel_model, auto_label_batch, None,
-            make_datasets, training_model, None,
+            make_datasets, training_model, open_train_console, None,
             folder_info, label_info))
         addActions(self.menus.video, (extract_videos, extract_stream, None, annotate_videos))
         addActions(self.menus.file,
@@ -945,7 +956,9 @@ class MainWindow(QMainWindow, WindowMixin):
             startupImageDir = self.filePath
 
         # Since loading may take time, queue it to run after UI setup.
-        if startupImageDir:
+        if self._cli_image_dir and self._cli_label_dir:
+            self.queueEvent(partial(self._startup_yolo_dataset, self._cli_image_dir, self._cli_label_dir))
+        elif startupImageDir:
             self.queueEvent(partial(self.importDirImages, startupImageDir))
         elif self.filePath and os.path.isfile(self.filePath):
             self.queueEvent(partial(self.loadFile, self.filePath))
@@ -2467,20 +2480,23 @@ class MainWindow(QMainWindow, WindowMixin):
             self.canvas.resetAllLines()
 
     def scrollRequest(self, delta, orientation):
-        units = - delta / (8 * 15)
+        units = -delta / (8 * 15)
         bar = self.scrollBars[orientation]
-        bar.setValue(bar.value() + bar.singleStep() * units)
+        bar.setValue(int(bar.value() + bar.singleStep() * units))
 
     def setZoom(self, value):
         self.actions.fitWidth.setChecked(False)
         self.actions.fitWindow.setChecked(False)
         self.zoomMode = self.MANUAL_ZOOM
-        self.zoomWidget.setValue(value)
+        lo, hi = self.zoomWidget.minimum(), self.zoomWidget.maximum()
+        self.zoomWidget.setValue(int(round(max(lo, min(hi, value)))))
 
     def addZoom(self, increment=10):
         self.setZoom(self.zoomWidget.value() + increment)
 
     def zoomRequest(self, delta):
+        if self.image.isNull():
+            return
         # get the current scrollbar positions
         # calculate the percentages ~ coordinates
         h_bar = self.scrollBars[Qt.Horizontal]
@@ -2495,9 +2511,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # where 0 = move left
         #       1 = move right
         # up and down analogous
-        cursor = QCursor()
-        pos = cursor.pos()
-        relative_pos = QWidget.mapFromGlobal(self, pos)
+        pos = QCursor.pos()
+        relative_pos = self.scrollArea.mapFromGlobal(pos)
 
         cursor_x = relative_pos.x()
         cursor_y = relative_pos.y()
@@ -2508,8 +2523,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # the scaling from 0 to 1 has some padding
         # you don't have to hit the very leftmost pixel for a maximum-left movement
         margin = 0.1
-        move_x = (cursor_x - margin * w) / (w - 2 * margin * w)
-        move_y = (cursor_y - margin * h) / (h - 2 * margin * h)
+        denom_x = w - 2 * margin * w
+        denom_y = h - 2 * margin * h
+        move_x = (cursor_x - margin * w) / denom_x if denom_x > 0 else 0.5
+        move_y = (cursor_y - margin * h) / denom_y if denom_y > 0 else 0.5
 
         # clamp the values from 0 to 1
         move_x = min(max(move_x, 0), 1)
@@ -2529,8 +2546,8 @@ class MainWindow(QMainWindow, WindowMixin):
         new_h_bar_value = h_bar.value() + move_x * d_h_bar_max
         new_v_bar_value = v_bar.value() + move_y * d_v_bar_max
 
-        h_bar.setValue(new_h_bar_value)
-        v_bar.setValue(new_v_bar_value)
+        h_bar.setValue(int(round(new_h_bar_value)))
+        v_bar.setValue(int(round(new_v_bar_value)))
 
     def setFitWindow(self, value=True):
         if value:
@@ -2664,7 +2681,8 @@ class MainWindow(QMainWindow, WindowMixin):
         super(MainWindow, self).resizeEvent(event)
 
     def paintCanvas(self):
-        assert not self.image.isNull(), "cannot paint null image"
+        if self.image.isNull():
+            return
         self.canvas.scale = 0.01 * self.zoomWidget.value()
         self.canvas.adjustSize()
         self.canvas.update()
@@ -2825,6 +2843,17 @@ class MainWindow(QMainWindow, WindowMixin):
             self.rebuildFileAnnoMetaCache()
             self.refreshSpeciesFilterOptions()
             self.applyFileListFilters()
+
+    def _startup_yolo_dataset(self, image_dir, label_dir):
+        """CLI --datasets: YOLO format, load images and save labels to label_dir."""
+        self.set_format(FORMAT_YOLO)
+        self.defaultSaveDir = ustr(label_dir)
+        self.xml_folder_path = ustr(label_dir)
+        if os.path.isdir(label_dir):
+            self.handleSavedirLabelNames(label_dir)
+        self.importDirImages(ustr(image_dir))
+        self.statusBar().showMessage(
+            u'YOLO 数据集: images=%s  labels=%s' % (image_dir, label_dir), 10000)
 
     def openAnnotationDialog(self, _value=False):
         if self.filePath is None:
@@ -4836,6 +4865,38 @@ class MainWindow(QMainWindow, WindowMixin):
         return tr_i, va_i, tr_l, va_l, root
 
     
+    def _guess_data_yaml_for_train(self):
+        """Infer data.yaml from last train yaml or current YOLO label directory."""
+        yaml_path = getattr(self, 'yaml', None)
+        if yaml_path and os.path.isfile(yaml_path):
+            return os.path.abspath(yaml_path)
+        save_dir = self.defaultSaveDir
+        if not save_dir or not os.path.isdir(save_dir):
+            return None
+        root = os.path.abspath(save_dir)
+        parts = root.replace('\\', '/').split('/')
+        if parts and parts[-1] in ('train', 'val', 'test') and len(parts) >= 2 and parts[-2] == 'labels':
+            root = os.path.dirname(os.path.dirname(root))
+        for name in ('data.yaml', 'fish_one.yaml', 'dataset.yaml'):
+            cand = os.path.join(root, name)
+            if os.path.isfile(cand):
+                return cand
+        return None
+
+    def open_train_console(self, _value=False):
+        """Annotate-Tools → Train Console: launch FishVision Train GUI."""
+        try:
+            from libs.fvt_launcher import launch_train_gui
+
+            data_yaml = self._guess_data_yaml_for_train()
+            launch_train_gui(data_yaml)
+            msg = u'已启动 FishVision 训练控制台'
+            if data_yaml:
+                msg += u'\n' + data_yaml
+            self.statusBar().showMessage(msg, 8000)
+        except Exception as exc:
+            QMessageBox.warning(self, u'启动训练控制台失败', ustr(exc))
+
     def training_model(self):
         try:
             from libs.train_dialog import TrainModelDialog, save_train_dialog_values
@@ -5352,7 +5413,38 @@ def get_main_app(argv=[]):
     Standard boilerplate Qt application code.
     Do everything but app.exec_() -- so that we can test the application in one thread
     """
+    import argparse
+
     from libs.win_qt_taskbar import load_brand_qicon, set_windows_app_user_model_id
+
+    parser = argparse.ArgumentParser(description=__appname__)
+    parser.add_argument(
+        "--datasets", "--dataset",
+        dest="dataset_root",
+        default=None,
+        help="YOLO dataset root; auto-open images/ and labels/ (e.g. --datasets path/to/dataset)",
+    )
+    parser.add_argument(
+        "--split",
+        default="auto",
+        choices=("auto", "train", "val", "test", "all"),
+        help="Split folder when using --datasets (default: auto)",
+    )
+    parser.add_argument("image", nargs="?", default=None, help="Legacy: startup image file")
+    parser.add_argument("predef_class", nargs="?", default=None, help="Legacy: predefined classes file")
+    parser.add_argument("save_dir", nargs="?", default=None, help="Legacy: annotation save directory")
+    args = parser.parse_args(argv[1:] if len(argv) > 1 else [])
+
+    cli_image = cli_label = None
+    if args.dataset_root:
+        from libs.yolo_dataset_paths import resolve_yolo_split_paths
+
+        try:
+            cli_image, cli_label, _split_used, _names = resolve_yolo_split_paths(
+                args.dataset_root, args.split)
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"ALT: {exc}", file=sys.stderr)
+            sys.exit(2)
 
     set_windows_app_user_model_id('Brigchen.AutoLabelTool.ALT.1')
     app = QApplication(argv)
@@ -5362,12 +5454,11 @@ def get_main_app(argv=[]):
         icon = newIcon('app')
     app.setWindowIcon(icon)
 
-    # Usage : ALT.py image predefClassFile saveDir
-    win = MainWindow(argv[1] if len(argv) >= 2 else None,
-                     argv[2] if len(argv) >= 3 else os.path.join(
-                         os.path.dirname(sys.argv[0]),
-                         'datasets', 'predefined_classes.txt'),
-                     argv[3] if len(argv) >= 4 else None) #os.path.join(os.path.dirname(sys.argv[0]), 'data', 'xml'))
+    default_predef = args.predef_class or os.path.join(
+        os.path.dirname(sys.argv[0]), 'datasets', 'predefined_classes.txt')
+    default_save = cli_label or args.save_dir
+    win = MainWindow(args.image, default_predef, default_save,
+                     cli_image_dir=cli_image, cli_label_dir=cli_label)
     win.setWindowIcon(icon)
     win.show()
     return app, win

@@ -10,23 +10,23 @@ where py >nul 2>nul && goto run_py
 goto run_python
 
 :run_custom
-start "FishVision Train" cmd /K cd /d "%CD%" ^&^& "%AUTO_LABEL_PYTHON%" src\FishVision_Train_GUI.py
+start "FishVision Train" cmd /K cd /d "%CD%" ^&^& "%AUTO_LABEL_PYTHON%" src\FishVision_Train_GUI.py %*
 goto eof
 
 :run_py313
-start "FishVision Train" cmd /K cd /d "%CD%" ^&^& "%FVT_PYTHON%" src\FishVision_Train_GUI.py
+start "FishVision Train" cmd /K cd /d "%CD%" ^&^& "%FVT_PYTHON%" src\FishVision_Train_GUI.py %*
 goto eof
 
 :run_conda
-start "FishVision Train" cmd /K cd /d "%CD%" ^&^& "C:\ProgramData\Anaconda3\python.exe" src\FishVision_Train_GUI.py
+start "FishVision Train" cmd /K cd /d "%CD%" ^&^& "C:\ProgramData\Anaconda3\python.exe" src\FishVision_Train_GUI.py %*
 goto eof
 
 :run_py
-start "FishVision Train" cmd /K cd /d "%CD%" ^&^& py -3 src\FishVision_Train_GUI.py
+start "FishVision Train" cmd /K cd /d "%CD%" ^&^& py -3 src\FishVision_Train_GUI.py %*
 goto eof
 
 :run_python
-start "FishVision Train" cmd /K cd /d "%CD%" ^&^& python src\FishVision_Train_GUI.py
+start "FishVision Train" cmd /K cd /d "%CD%" ^&^& python src\FishVision_Train_GUI.py %*
 
 :eof
 popd

@@ -38,11 +38,11 @@ SETTING_LAST_UPDATE_CHECK = 'update/last_check'
 SETTING_KEYPOINT_TEMPLATE = 'keypoints/template'
 SETTING_KEYPOINT_SCHEMA_FILE = 'keypoints/schema_file'
 DEFAULT_ENCODING = 'utf-8'
-APP_VERSION = '3.2.0'
-APP_UPDATE_DATE = '2026-5-21'
+APP_VERSION = '3.3.0'
+APP_UPDATE_DATE = '2026-5-29'
 APP_CHANGELOG = [
-    'FishVision Trainer: tabbed GUI (basic/optimizer/augment/hardware/tune), live tqdm progress, epoch summaries',
-    'Session config: auto-save on exit to configs/config_FVT_last.ini; resume last params on startup',
-    'Training runner: TensorBoard enable, CUDA/sm_120 audit, AMP prefetch, best.pt export to weights/',
-    'Terminal training mode, results.csv watcher, exist_ok/resume run-dir handling',
+    'FishVision Trainer: test report (HTML, train/val/test, random sample, export all low-score by split)',
+    'ALT ↔ Trainer: launch Train Console from ALT; launch ALT after report or from toolbar',
+    'ALT CLI: --datasets / --split auto-open YOLO images & labels; default mouse-wheel zoom',
+    'Training/logging: stream close fix on exit; env_bootstrap suppresses pynvml warning',
 ]

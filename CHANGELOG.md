@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here.
 
+## [3.3.0] – 2026-05-29
+
+### Added
+
+- **Test report** (`libs/test_report.py`, FishVision Trainer): evaluate train/val/test or custom dataset directory; HTML report with GT vs pred overlays; optional Ultralytics val metrics; export **all** low-score samples (F1 &lt; 1) to `images/<split>/` + `labels/<split>/`.
+- **Random sample mode**: test full split by default, or evaluate a random subset count.
+- **GUI cross-launch**: Trainer → **打开 ALT**; ALT → **Train Console** (`Ctrl+Shift+T`); post-report prompt to open ALT on exported low-score dataset.
+- **`libs/alt_launcher.py`**, **`libs/fvt_launcher.py`**, **`libs/yolo_dataset_paths.py`**: subprocess launchers and YOLO path resolution shared by ALT and Trainer.
+- **ALT CLI**: `--datasets` / `--dataset` and `--split` to auto-load images/labels on startup.
+- **`libs/env_bootstrap.py`**: suppresses deprecated `pynvml` import warning before torch.
+- **`scripts/build_fish_one2_test.py`**: helper to build a held-out test split from an existing YOLO dataset.
+- **Batch launchers**: `Auto_Label_Tool.bat` and `FishVision_trainer.bat` pass through `%*` (CLI args).
+
+### Changed
+
+- **ALT canvas zoom**: mouse wheel zooms by default; **Shift+wheel** scrolls (no Ctrl required).
+- **FishVision Trainer**: `--data` CLI pre-fills data yaml path.
+
+### Fixed
+
+- Test report dialog `dataset_status` init order; export `lbl_dir` typo; split-aware export folders (not always `test`).
+- `QScrollBar.setValue(float)` crashes on wheel zoom / scroll.
+- Training exit: `_QueueWriter` / stream wrappers now implement `close()`; logging handlers restored after train (`restore_logging_streams`).
+
+---
+
 ## [3.2.0] – 2026-05-21
 
 ### Added

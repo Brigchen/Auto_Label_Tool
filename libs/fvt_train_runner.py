@@ -5,15 +5,18 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import traceback
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-# Must be set before import torch when Ultralytics deterministic=True
-if not os.environ.get("CUBLAS_WORKSPACE_CONFIG"):
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+import libs.env_bootstrap  # noqa: F401,E402  # before torch
 
 import torch
 from ultralytics import YOLO
@@ -202,14 +205,19 @@ class TrainProgressStream:
 
 
 def _rebind_logging_streams(stream) -> None:
-    """Point ultralytics/root StreamHandlers at the filtered stdout wrapper."""
+    """Point ultralytics/root/absl StreamHandlers at the given stream."""
     import logging
 
-    for logger_name in ("", "ultralytics"):
+    for logger_name in ("", "ultralytics", "absl"):
         logger = logging.getLogger(logger_name)
         for handler in logger.handlers:
             if isinstance(handler, logging.StreamHandler):
                 handler.setStream(stream)
+
+
+def restore_logging_streams(stream) -> None:
+    """Restore logging handlers after train stream wrappers are removed."""
+    _rebind_logging_streams(stream)
 
 
 def install_train_stream_filters(
@@ -240,6 +248,15 @@ def install_train_stream_filters(
 
         def isatty(self):
             return router._is_tty(self._inner)
+
+        def close(self):
+            try:
+                self.flush()
+            except Exception:
+                pass
+            close_fn = getattr(self._inner, "close", None)
+            if callable(close_fn):
+                close_fn()
 
         def __getattr__(self, name):
             return getattr(self._inner, name)
@@ -782,6 +799,7 @@ def run_training(
         finally:
             sys.stdout = prev_out
             sys.stderr = prev_err
+            restore_logging_streams(prev_out)
             stop_hb.set()
             training_started.set()
 
