@@ -40,3 +40,7 @@ tensorboard>=2.12.0
 # onnx>=1.14.0              # model export (Ultralytics ONNX)
 # onnxruntime>=1.15.0
 # tensorrt                  # libs/model_export.py TensorRT build
+
+# --- Eval export (Excel confusion matrix / per-class metrics) ---
+openpyxl>=3.1.0
+

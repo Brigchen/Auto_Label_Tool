@@ -10,23 +10,23 @@ where py >nul 2>nul && goto run_py
 goto run_python
 
 :run_custom
-start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& "%AUTO_LABEL_PYTHON%" src\ALT.py %*
+start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& "%AUTO_LABEL_PYTHON%" src\alt_boot.py %*
 goto eof
 
 :run_py313
-start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& "%FVT_PYTHON%" src\ALT.py %*
+start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& "%FVT_PYTHON%" src\alt_boot.py %*
 goto eof
 
 :run_conda
-start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& "C:\ProgramData\Anaconda3\python.exe" src\ALT.py %*
+start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& "C:\ProgramData\Anaconda3\python.exe" src\alt_boot.py %*
 goto eof
 
 :run_py
-start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& py -3 src\ALT.py %*
+start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& py -3 src\alt_boot.py %*
 goto eof
 
 :run_python
-start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& python src\ALT.py %*
+start "Auto_Label_Tool" cmd /K cd /d "%CD%" ^&^& python src\alt_boot.py %*
 
 :eof
 popd

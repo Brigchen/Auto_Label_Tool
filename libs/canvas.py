@@ -27,6 +27,7 @@ class Canvas(QWidget):
     zoomRequest = pyqtSignal(int)
     scrollRequest = pyqtSignal(int, int)
     newShape = pyqtSignal()
+    undoCheckpoint = pyqtSignal()
     selectionChanged = pyqtSignal(bool)
     shapeMoved = pyqtSignal()
     drawingPolygon = pyqtSignal(bool)
@@ -65,6 +66,8 @@ class Canvas(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.WheelFocus)
         self.verified = False
+        self._move_undo_pushed = False
+        self._arrow_undo_pushed = False
         self.drawSquare = False
         self.drawingShapeMode = 'bbox'
         self.keypointNames = []
@@ -276,10 +279,16 @@ class Canvas(QWidget):
             else:
                 self.selectShapePoint(pos)
                 self.prevPoint = pos
+                if self.selectedShape and not self._move_undo_pushed:
+                    self.undoCheckpoint.emit()
+                    self._move_undo_pushed = True
                 self.repaint()
         elif ev.button() == Qt.RightButton and self.editing():
             self.selectShapePoint(pos)
             self.prevPoint = pos
+            if self.selectedShape and not self._move_undo_pushed:
+                self.undoCheckpoint.emit()
+                self._move_undo_pushed = True
             self.repaint()
 
     def _keypoint_vertex_at(self, pos):
@@ -295,6 +304,8 @@ class Canvas(QWidget):
         return None, None
 
     def mouseReleaseEvent(self, ev):
+        if ev.button() in (Qt.LeftButton, Qt.RightButton):
+            self._move_undo_pushed = False
         if ev.button() == Qt.RightButton:
             self.restoreCursor()
             if self.editing() and not self.selectedShapeCopy and self.keypointNames:
@@ -560,6 +571,8 @@ class Canvas(QWidget):
             self.update()
 
     def deleteSelected(self):
+        if self.selectedShape:
+            self.undoCheckpoint.emit()
         if self.selectedShape and getattr(self.selectedShape, 'shape_type', '') == 'keypoints' and self.selectedVertex():
             sh = self.selectedShape
             idx = self.hVertex
@@ -594,6 +607,7 @@ class Canvas(QWidget):
 
     def copySelectedShape(self):
         if self.selectedShape:
+            self.undoCheckpoint.emit()
             shape = self.selectedShape.copy()
             self.deSelectShape()
             self.shapes.append(shape)
@@ -705,6 +719,7 @@ class Canvas(QWidget):
             self.current.skeleton = [tuple(p) for p in self.keypointSkeleton]
             if self.pixmap:
                 spread_keypoint_placeholders(self.current, self.pixmap.width(), self.pixmap.height())
+        self.undoCheckpoint.emit()
         self.shapes.append(self.current)
         self.current = None
         self.setHiding(False)
@@ -809,6 +824,11 @@ class Canvas(QWidget):
             h_delta and self.scrollRequest.emit(h_delta, Qt.Horizontal)
         ev.accept()
 
+    def keyReleaseEvent(self, ev):
+        if ev.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            self._arrow_undo_pushed = False
+        super(Canvas, self).keyReleaseEvent(ev)
+
     def keyPressEvent(self, ev):
         key = ev.key()
         if key == Qt.Key_Escape and self.current:
@@ -829,14 +849,18 @@ class Canvas(QWidget):
                     self.selectedShape.keypoint_visibility[idx] = v
                     self.shapeMoved.emit()
                     self.repaint()
-        elif key == Qt.Key_Left and self.selectedShape:
-            self.moveOnePixel('Left')
-        elif key == Qt.Key_Right and self.selectedShape:
-            self.moveOnePixel('Right')
-        elif key == Qt.Key_Up and self.selectedShape:
-            self.moveOnePixel('Up')
-        elif key == Qt.Key_Down and self.selectedShape:
-            self.moveOnePixel('Down')
+        elif key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down) and self.selectedShape:
+            if not self._arrow_undo_pushed:
+                self.undoCheckpoint.emit()
+                self._arrow_undo_pushed = True
+            if key == Qt.Key_Left:
+                self.moveOnePixel('Left')
+            elif key == Qt.Key_Right:
+                self.moveOnePixel('Right')
+            elif key == Qt.Key_Up:
+                self.moveOnePixel('Up')
+            else:
+                self.moveOnePixel('Down')
 
     def moveOnePixel(self, direction):
         # print(self.selectedShape.points)

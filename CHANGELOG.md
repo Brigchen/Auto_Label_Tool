@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## [3.4.0] – 2026-05-30
+
+### Added
+
+- **ALT startup splash** (`src/alt_boot.py`, `libs/startup_ui.py`): show progress immediately; defer heavy **torch/ultralytics** import until Auto Label / training (`libs/lazy_ml.py`).
+- **Annotation undo/redo** (`libs/anno_undo.py`): **Ctrl+Z** / **Ctrl+Y** (or **Ctrl+Shift+Z**) for delete, move, edit label, Auto Label, copy labels, etc. (up to 50 steps per image).
+- **Choose Auto-Label Model** dialog: set **weights + conf / predict IoU / dedup IoU** together (`ChooseAutoLabelModelDialog` in `libs/annotate_dialogs.py`).
+- **Eval export** (`libs/eval_export.py`): per-class metrics Excel + normalized confusion matrix (CSV/JSON) for training val and test report; dependency **openpyxl**.
+
+### Changed
+
+- **Edit Label**: input on top, class list below; default focus on list; highlight **last used** class; single-click or **Enter** on list confirms selection.
+- **File list**: right-click delete image + labels **without** confirmation; unsaved edits on current image are discarded when deleting.
+- **ALT launch**: `Auto_Label_Tool.bat` and `libs/alt_launcher.py` use `src/alt_boot.py`; large-folder load shows progress while indexing annotations.
+
+### Fixed
+
+- Edit Label: **Enter** after keyboard letter-jump in class list now confirms the highlighted item.
+- `requirements.txt`: restore separate **openpyxl** line (was accidentally merged with comment).
+
+---
+
 ## [3.3.0] – 2026-05-29
 
 ### Added

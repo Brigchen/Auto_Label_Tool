@@ -38,8 +38,8 @@ SETTING_LAST_UPDATE_CHECK = 'update/last_check'
 SETTING_KEYPOINT_TEMPLATE = 'keypoints/template'
 SETTING_KEYPOINT_SCHEMA_FILE = 'keypoints/schema_file'
 DEFAULT_ENCODING = 'utf-8'
-APP_VERSION = '3.3.0'
-APP_UPDATE_DATE = '2026-5-29'
+APP_VERSION = '3.4.0'
+APP_UPDATE_DATE = '2026-5-30'
 APP_CHANGELOG = [
     'FishVision Trainer: test report (HTML, train/val/test, random sample, export all low-score by split)',
     'ALT ↔ Trainer: launch Train Console from ALT; launch ALT after report or from toolbar',

@@ -29,6 +29,7 @@ from libs.train_monitor import (
     find_latest_run_dir,
     resolve_run_base,
 )
+from libs.eval_export import export_post_train_val_metrics
 from libs.yolo_weights import resolve_yolo_checkpoint
 
 LogFn = Callable[[str], None]
@@ -796,6 +797,18 @@ def run_training(
                 pass
             _log_ts("model.train() 正常返回", log)
             export_best_weight(params, model=model, log=log)
+            run_dir = find_latest_run_dir(
+                params.get("task", "detect"),
+                params.get("project", ""),
+                params.get("name", "train"),
+            )
+            if run_dir:
+                try:
+                    export_post_train_val_metrics(
+                        model, params, run_dir, split="val", log=log,
+                    )
+                except Exception as exc:
+                    _log_ts(f"类群评估 Excel 导出: {exc}", log)
         finally:
             sys.stdout = prev_out
             sys.stderr = prev_err

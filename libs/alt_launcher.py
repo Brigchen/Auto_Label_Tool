@@ -32,7 +32,7 @@ def launch_alt(
 ) -> subprocess.Popen:
     """Start ALT.py; optional --datasets opens images/labels automatically."""
     repo = repo_root()
-    alt_py = os.path.join(repo, "src", "ALT.py")
+    alt_py = os.path.join(repo, "src", "alt_boot.py")
     if not os.path.isfile(alt_py):
         raise FileNotFoundError(f"未找到 ALT: {alt_py}")
 

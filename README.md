@@ -8,7 +8,7 @@
 
 | 模块 | 说明 |
 |------|------|
-| **ALT 标注主程序**（`src/ALT.py`） | VOC / YOLO 格式、关键点、自动标注、视频追踪标注、放大镜、类别筛选与统计、标注校正；**Train Console** 启动完整训练 GUI；CLI **`--datasets`** 自动打开数据集目录。 |
+| **ALT 标注主程序**（`src/ALT.py`） | VOC / YOLO 格式、关键点、自动标注、**Ctrl+Z 撤销**、视频追踪标注、放大镜、类别筛选与统计、标注校正；**Choose Auto-Label Model** 一次设置权重与 conf；**Train Console**；CLI **`--datasets`**；启动闪屏与大数据集加载进度。 |
 | **FishVision**（`src/FishVision_GUI.py`） | 视频或 RTSP 预览、检测，可选跟踪与画面增强。 |
 | **FishVision 训练界面**（`src/FishVision_Train_GUI.py`） | 五选项卡训练控制台：基本参数、优化器、数据增强、硬件/高级、自动调参；实时单行进度（s/it、ETA）、每 epoch 指标摘要；**测试报告**（train/val/test、随机抽样、低分样本导出）；**打开 ALT** 改标注；退出自动保存参数；TensorBoard / 终端训练；训练结束自动复制 `best.pt` 到 `weights/`。 |
 
@@ -36,6 +36,7 @@ py -3 -m pip install -r requirements.txt
 2. **Windows**：可直接双击根目录下的批处理；或在已激活环境的终端中执行：
 
 ```bat
+python src\alt_boot.py
 python src\ALT.py
 python src\ALT.py --datasets H:/path/to/dataset --split val
 python src\FishVision_GUI.py
@@ -43,7 +44,7 @@ python src\FishVision_Train_GUI.py
 python src\FishVision_Train_GUI.py --data H:/path/to/data.yaml
 ```
 
-- `Auto_Label_Tool.bat` → 启动 ALT  
+- `Auto_Label_Tool.bat` → 启动 ALT（推荐，含启动闪屏）  
 - `FishVision.bat` → FishVision  
 - `FishVision_trainer.bat` → 训练界面  
 
@@ -66,7 +67,10 @@ python src\FishVision_Train_GUI.py --data H:/path/to/data.yaml
 
 6. **标注（ALT）**  
    - 菜单 **Annotate-Tools → Train Console** 打开 FishVision 训练控制台。  
+   - **Annotate-Tools → Choose Auto-Label Model**：同时设置检测模型与 **conf / IoU** 阈值。  
+   - **Edit → Undo / Redo** 或 **Ctrl+Z / Ctrl+Y**：撤销误删框、Auto Label 等操作。  
    - 滚轮缩放图像，**Shift+滚轮** 平移。  
+   - 文件列表右键可删除图像及标注（无二次确认）。  
    - 命令行：`Auto_Label_Tool.bat --datasets <数据集根目录> --split test`。
 
 ---
@@ -83,6 +87,9 @@ python src\FishVision_Train_GUI.py --data H:/path/to/data.yaml
 | 路径 | 作用 |
 |------|------|
 | `src/ALT.py` | 主标注程序 |
+| `src/alt_boot.py` | ALT 启动入口（闪屏 + 延迟加载 ML 库） |
+| `libs/anno_undo.py` | 标注撤销/重做 |
+| `libs/eval_export.py` | 训练/测试 per-class Excel 与混淆矩阵导出 |
 | `src/FishVision_GUI.py` | 视频 / RTSP 工具 |
 | `src/FishVision_Train_GUI.py` | 训练图形界面（选项卡控制台 + 测试报告） |
 | `libs/fvt_train_runner.py` | 训练执行与进度/导出逻辑 |

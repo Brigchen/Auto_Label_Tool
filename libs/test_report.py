@@ -21,6 +21,11 @@ from ultralytics import YOLO
 from libs.iou import compute_IOU
 from libs.pkg_paths import resolve_cjk_plot_font
 from libs.yolo_dataset_paths import ensure_classes_txt
+from libs.eval_export import (
+    export_ultralytics_val_results,
+    export_custom_eval_results,
+    per_class_rows_from_image_stats,
+)
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[int, int, str], None]
@@ -677,6 +682,7 @@ def _write_html(
     data_yaml: str,
     export_dataset_dir: str = "",
     export_split: str = "",
+    excel_path: str = "",
 ) -> str:
     index_path = os.path.join(out_dir, "index.html")
     rel = lambda p: html.escape(os.path.relpath(p, out_dir).replace("\\", "/"))
@@ -724,6 +730,12 @@ def _write_html(
             f"<p>低分样本数据集: <code>{html.escape(export_dataset_dir)}</code>"
             f"（images/{html.escape(exp_split)} + labels/{html.escape(exp_split)}，"
             f"全部 F1&lt;1 样本已导出，可用标注工具打开修正）</p>"
+        )
+    if excel_path:
+        summary += (
+            f"<p>类群评估 Excel: <code>{html.escape(excel_path)}</code>；"
+            f"混淆矩阵: <code>{html.escape(os.path.join(out_dir, 'confusion_matrix_normalized.csv'))}</code>、"
+            f"<code>{html.escape(os.path.join(out_dir, 'confusion_matrix_normalized.json'))}</code></p>"
         )
 
     doc = f"""<!DOCTYPE html>
@@ -882,22 +894,24 @@ def run_test_report(
     model = YOLO(weights)
 
     overall: dict = {}
+    val_metrics = None
     can_ultra_val = run_ultralytics_val and yaml_for_val and os.path.isfile(yaml_for_val)
     if run_ultralytics_val and not can_ultra_val:
         _log("Ultralytics 整集验证跳过（自定义目录模式或无 data.yaml）", log)
     if can_ultra_val:
         try:
             _log("Ultralytics 整集验证…", log)
-            metrics = model.val(
+            val_metrics = model.val(
                 data=yaml_for_val,
                 split=split_used if split_used in ("train", "val", "test") else "val",
                 conf=conf,
                 iou=iou_match,
                 device=device,
                 verbose=False,
+                plots=False,
             )
-            if hasattr(metrics, "results_dict"):
-                rd = metrics.results_dict
+            if hasattr(val_metrics, "results_dict"):
+                rd = val_metrics.results_dict
                 for k in ("metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)"):
                     if k in rd:
                         overall[k.replace("metrics/", "").replace("(B)", "")] = f"{float(rd[k]):.4f}"
@@ -968,6 +982,44 @@ def run_test_report(
         )
 
     class_stats = _class_stats(results)
+    image_class_rows = per_class_rows_from_image_stats(class_stats)
+    excel_path = ""
+    try:
+        export_extra = {
+            "weights": weights,
+            "data_yaml": report_yaml,
+            "eval_images": len(results),
+            "iou_match": iou_match,
+            "conf": conf,
+        }
+        if val_metrics is not None:
+            paths = export_ultralytics_val_results(
+                val_metrics,
+                out_dir,
+                basename="eval_metrics",
+                split=split_used,
+                overall_extra=export_extra,
+                image_class_rows=image_class_rows,
+                log=log,
+            )
+        else:
+            paths = export_custom_eval_results(
+                out_dir,
+                pairs=pairs,
+                pred_map=pred_map,
+                names=names,
+                iou_thr=iou_match,
+                load_gt_boxes=load_gt_boxes,
+                basename="eval_metrics",
+                split=split_used,
+                overall=export_extra,
+                image_class_rows=image_class_rows,
+                log=log,
+            )
+        excel_path = paths.get("excel", "")
+    except Exception as exc:
+        _log(f"类群评估 Excel 导出失败: {exc}", log)
+
     html_path = _write_html(
         out_dir,
         report_title="FishVision 测试集诊断报告",
@@ -980,6 +1032,7 @@ def run_test_report(
         data_yaml=report_yaml,
         export_dataset_dir=exported_dataset_dir,
         export_split=export_split,
+        excel_path=excel_path,
     )
     _log(f"报告已生成: {html_path}", log)
     _log(f"低分样本: {len(low_score)} 张（报告可视化前 {len(preview)} 张）", log)

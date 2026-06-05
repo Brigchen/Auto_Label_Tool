@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import codecs, os, sys, platform, subprocess, random
+from pathlib import Path
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -14,7 +15,6 @@ import xml.etree.ElementTree as ET
 from copy import deepcopy
 from strsimpy.jaro_winkler import JaroWinkler
 from functools import partial
-import torch
 import traceback
 import glob
 import shutil
@@ -34,37 +34,6 @@ for _p in list(sys.path):
     if _abs_p == _SCRIPT_DIR:
         _removed_sys_paths.append(_p)
         sys.path.remove(_p)
-
-from ultralytics import YOLO
-from ultralytics.utils.torch_utils import time_sync
-try:
-    from ultralytics.data.loaders import LoadImages
-except Exception:
-    class LoadImages:
-        """Compatibility fallback for ultralytics>=8.4 where old LoadImages API changed."""
-        IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
-
-        def __init__(self, path):
-            self.files = []
-            if os.path.isdir(path):
-                for name in sorted(os.listdir(path)):
-                    p = os.path.join(path, name)
-                    if os.path.isfile(p) and name.lower().endswith(self.IMG_EXTS):
-                        self.files.append(p)
-            elif os.path.isfile(path):
-                self.files = [path]
-
-        def __len__(self):
-            return len(self.files)
-
-        def __iter__(self):
-            for p in self.files:
-                img = cv2.imread(p)
-                if img is None:
-                    continue
-                # Keep shape compatible with historical usage:
-                # for path, img, _, _ in dataset: path[0] ...
-                yield [p], img, None, None
 
 for _p in reversed(_removed_sys_paths):
     if _p not in sys.path:
@@ -95,6 +64,11 @@ from libs.keypoint_utils import pad_keypoints_shape, spread_keypoint_placeholder
 # from libs.pascal_voc_io import XML_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
+from libs.anno_undo import (
+    restore_annotation_snapshot,
+    snapshot_with_visibility,
+    snapshots_equal,
+)
 # FILE = Path('ALT.py').resolve() #__file__
 # ROOT = FILE.parents[0]
 #
@@ -108,8 +82,10 @@ __version__ = APP_VERSION
 __update__ = APP_UPDATE_DATE
 __copyright__ = "Brigchen, from Ocean-IDEA of XMU"
 __contact__ = "brigchen@xmu.edu.cn"
+ANNOTATION_UNDO_LIMIT = 50
 from libs.repo_paths import repo_root
 from libs.yolo_weights import DEFAULT_DETECT_PT, resolve_yolo_checkpoint
+from libs.lazy_ml import get_torch, get_yolo_model
 
 APP_ROOT = repo_root()
 _version_info = {
@@ -190,7 +166,7 @@ def get_cpu_mem():
 
 
 def get_cuda_setup(bsize1, gpu_mem1):
-    
+    torch = get_torch()
     if torch.cuda.is_available():
         mem = get_gpu_mem(0)
         gpuid = 0
@@ -240,6 +216,7 @@ class train_one(QThread):
         self.task = (kwargs.get('task') or 'detect').strip()
     def run(self):
         try:
+            torch = get_torch()
             if torch.cuda.is_available():
                 if torch.cuda.device_count() > 1:
                     gpuid, free_mem, bsize = get_cuda_setup(24,24)
@@ -252,7 +229,7 @@ class train_one(QThread):
             w = resolve_yolo_checkpoint(self.weights, os.path.join(APP_ROOT, 'weights'))
             if w != self.weights:
                 print('[train] resolved weights:', self.weights, '->', w)
-            model = YOLO(w)
+            model = get_yolo_model(w)
             train_kw = dict(
                 data=self.data,
                 batch=self.bsize,
@@ -324,11 +301,13 @@ class MainWindow(QMainWindow, WindowMixin):
             print('[ALT][WARN] persist autolabel settings:', e)
 
     def __init__(self, defaultFilename=None, defaultPrefdefClassFile=None, defaultSaveDir=None,
-                 cli_image_dir=None, cli_label_dir=None):
+                 cli_image_dir=None, cli_label_dir=None, splash=None):
+        self._startup_splash = splash
         super(MainWindow, self).__init__()
         self.setWindowTitle(__appname__)
         self._cli_image_dir = cli_image_dir
         self._cli_label_dir = cli_label_dir
+        self._startup_pulse('正在加载设置...')
         # Load setting in the main thread
         self.settings = Settings()
         self.settings.load()
@@ -363,6 +342,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Whether we need to save or not.
         self.dirty = False
+        self._undo_stack = []
+        self._redo_stack = []
+        self._undoing = False
 
         self._noSelectionSlot = False
         self._beginner = True
@@ -457,13 +439,18 @@ class MainWindow(QMainWindow, WindowMixin):
         self.dock.setWidget(labelListContainer)
 
         self.fileListWidget = QListWidget()
+        self.fileListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.fileListWidget.itemDoubleClicked.connect(self.fileitemDoubleClicked)
+        self.fileListWidget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.fileListWidget.customContextMenuRequested.connect(self.popFileListMenu)
         filelistLayout = QVBoxLayout()
         filelistLayout.setContentsMargins(0, 0, 0, 0)
         self.fileSpeciesFilterCombo = QComboBox()
         self.fileSpeciesFilterCombo.addItem('All species')
         self.fileSpeciesFilterCombo.currentIndexChanged.connect(self.applyFileListFilters)
         self.fileScoreFilterCheck = QCheckBox('Score <')
+        self.fileScoreFilterCheck.setToolTip(
+            '仅对含置信度字段的自动标注 YOLO 行有效（6 列）；标准 5 列标注会自动忽略此筛选项')
         self.fileScoreFilterSpin = QDoubleSpinBox()
         self.fileScoreFilterSpin.setRange(0.0, 1.0)
         self.fileScoreFilterSpin.setDecimals(3)
@@ -527,11 +514,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.scrollRequest.connect(self.scrollRequest)
 
         self.canvas.newShape.connect(self.newShape)
+        self.canvas.undoCheckpoint.connect(self._push_undo_checkpoint)
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.keypointRenameRequested.connect(self.rename_keypoint_at_vertex)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
 
+        self._startup_pulse('正在构建界面...')
         self.setCentralWidget(scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.filedock)
@@ -554,7 +543,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.choose_autolabel_model,
             'Ctrl+Shift+M',
             'open',
-            'Select YOLO weights for Auto Label current image (Q).',
+            'Select YOLO weights and detection thresholds (conf / IoU) for Auto Label.',
             enabled=True)
         auto_label_batch = action(
             'Auto Label Batch',
@@ -704,6 +693,14 @@ class MainWindow(QMainWindow, WindowMixin):
         edit = action(getStr('editLabel'), self.editLabel,
                       'E', 'edit', getStr('editLabelDetail'),
                       enabled=False)
+        undo_ann = action(
+            'Undo', self.undoAnnotations, 'Ctrl+Z', 'undo',
+            u'Undo last annotation change on this image (delete, move, auto-label, etc.).',
+            enabled=False)
+        redo_ann = action(
+            'Redo', self.redoAnnotations, 'Ctrl+Y', 'resetall',
+            u'Redo annotation change (Ctrl+Shift+Z).',
+            enabled=False)
         # self.editButton.setDefaultAction(edit)
 
         shapeLineColor = action(getStr('shapeLineColor'), self.chshapeLineColor,
@@ -723,6 +720,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.labelList.setContextMenuPolicy(Qt.CustomContextMenu)
         self.labelList.customContextMenuRequested.connect(
             self.popLabelListMenu)
+
+        self.fileListMenu = QMenu()
+        self.fileListOpenAct = QAction('Open', self)
+        self.fileListOpenAct.triggered.connect(self._fileListContextOpen)
+        self.fileListDeleteAct = QAction('Delete image && label(s)', self)
+        self.fileListDeleteAct.triggered.connect(self.deleteFilesFromFileList)
+        self.fileListMenu.addAction(self.fileListOpenAct)
+        self.fileListMenu.addAction(self.fileListDeleteAct)
 
         # Draw squares/rectangles
         self.drawSquaresOption = QAction('Draw Squares', self)
@@ -757,7 +762,8 @@ class MainWindow(QMainWindow, WindowMixin):
                               fileMenuActions=(
                                   open, opendir, save, saveAs, close, resetAll, quit, label_pruning, folder_info),
                               beginner=(), advanced=(),
-                              editMenu=(edit, copy, delete,
+                              undo=undo_ann, redo=redo_ann,
+                              editMenu=(undo_ann, redo_ann, None, edit, copy, delete,
                                         None, color1, self.drawSquaresOption),
                               beginnerContext=(autolabel, copylabel, create, edit, copy, delete),
                               advancedContext=(autolabel, copylabel, createMode, editMode, edit, copy,
@@ -807,6 +813,10 @@ class MainWindow(QMainWindow, WindowMixin):
         addActions(self.menus.file,
                    (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs, close, resetAll, quit))
         addActions(self.menus.help, (showInfo,))
+
+        QShortcut(QKeySequence.Undo, self, self.undoAnnotations)
+        QShortcut(QKeySequence.Redo, self, self.redoAnnotations)
+        QShortcut(QKeySequence('Ctrl+Shift+Z'), self, self.redoAnnotations)
         addActions(self.menus.view, (
             self.useMagnifyingLens,
             self.autoSaving,
@@ -926,8 +936,10 @@ class MainWindow(QMainWindow, WindowMixin):
                                          (__appname__, self.defaultSaveDir))
             self.statusBar().show()
         if self.defaultSaveDir is not None and os.path.exists(self.defaultSaveDir):
-            self.handleSavedirLabelNames(self.defaultSaveDir)
+            _save_dir = self.defaultSaveDir
+            self.queueEvent(partial(self._startup_load_save_dir, _save_dir))
 
+        self._startup_pulse('正在恢复窗口布局...')
         self.restoreState(settings.get(SETTING_WIN_STATE, QByteArray()))
         Shape.line_color = self.lineColor = QColor(settings.get(SETTING_LINE_COLOR, DEFAULT_LINE_COLOR))
         Shape.fill_color = self.fillColor = QColor(settings.get(SETTING_FILL_COLOR, DEFAULT_FILL_COLOR))
@@ -955,6 +967,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if startupImageDir is None and self.filePath and os.path.isdir(self.filePath):
             startupImageDir = self.filePath
 
+        self._startup_pulse('正在准备数据集...')
         # Since loading may take time, queue it to run after UI setup.
         if self._cli_image_dir and self._cli_label_dir:
             self.queueEvent(partial(self._startup_yolo_dataset, self._cli_image_dir, self._cli_label_dir))
@@ -985,6 +998,16 @@ class MainWindow(QMainWindow, WindowMixin):
             self.canvas.setDrawingShapeToSquare(self.drawSquaresOption.isChecked())
 
     def keyPressEvent(self, event):
+        mods = event.modifiers()
+        if mods & Qt.ControlModifier:
+            if event.key() == Qt.Key_Z and not (mods & Qt.ShiftModifier):
+                self.undoAnnotations()
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Y,) or (event.key() == Qt.Key_Z and mods & Qt.ShiftModifier):
+                self.redoAnnotations()
+                event.accept()
+                return
         if event.key() == Qt.Key_Control:
             # Draw rectangle if Ctrl is pressed
             if self.canvas.drawingShapeMode == 'bbox':
@@ -1232,6 +1255,18 @@ class MainWindow(QMainWindow, WindowMixin):
     def queueEvent(self, function):
         QTimer.singleShot(0, function)
 
+    def _startup_pulse(self, message):
+        if self._startup_splash is not None:
+            self._startup_splash.set_message(message)
+        else:
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+
+    def _startup_load_save_dir(self, dirpath):
+        self._startup_pulse('正在加载类别列表...')
+        self.handleSavedirLabelNames(dirpath)
+
     def status(self, message, delay=5000):
         self.statusBar().showMessage(message, delay)
 
@@ -1245,6 +1280,57 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.resetState()
         self.labelCoordinates.clear()
         self.comboBox.cb.clear()
+        self._clear_undo_stacks()
+
+    def _clear_undo_stacks(self):
+        self._undo_stack = []
+        self._redo_stack = []
+        self._update_undo_actions()
+
+    def _update_undo_actions(self):
+        enabled = bool(self.filePath) and self.canvas.isEnabled()
+        if hasattr(self, 'actions'):
+            self.actions.undo.setEnabled(enabled and bool(self._undo_stack))
+            self.actions.redo.setEnabled(enabled and bool(self._redo_stack))
+
+    def _push_undo_checkpoint(self):
+        if self._undoing or not self.filePath:
+            return
+        snap = snapshot_with_visibility(self)
+        if self._undo_stack and snapshots_equal(self._undo_stack[-1], snap):
+            return
+        self._undo_stack.append(snap)
+        if len(self._undo_stack) > ANNOTATION_UNDO_LIMIT:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._update_undo_actions()
+
+    def undoAnnotations(self):
+        if not self._undo_stack or not self.filePath:
+            return
+        self._redo_stack.append(snapshot_with_visibility(self))
+        snap = self._undo_stack.pop()
+        self._apply_annotation_snapshot(snap)
+        self.status(u'Undo (%d step(s) left)' % len(self._undo_stack))
+
+    def redoAnnotations(self):
+        if not self._redo_stack or not self.filePath:
+            return
+        self._undo_stack.append(snapshot_with_visibility(self))
+        snap = self._redo_stack.pop()
+        self._apply_annotation_snapshot(snap)
+        self.status(u'Redo (%d step(s) left)' % len(self._redo_stack))
+
+    def _apply_annotation_snapshot(self, snap):
+        self._undoing = True
+        try:
+            restore_annotation_snapshot(self, snap)
+            self.setDirty()
+            self.shapeSelectionChanged(False)
+            self.canvas.update()
+        finally:
+            self._undoing = False
+            self._update_undo_actions()
 
     def currentItem(self):
         items = self.labelList.selectedItems()
@@ -1425,6 +1511,7 @@ class MainWindow(QMainWindow, WindowMixin):
         assert self.beginner()
         print('Copy Last Labels to current image')
         try:
+            self._push_undo_checkpoint()
             if self.lastLabelFile:
                 if self.defaultSaveDir is not None:
                     basename = os.path.basename(
@@ -1618,7 +1705,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Try Ultralytics builtin download/caching pathway.
         try:
-            model = YOLO(prefer_model)
+            model = get_yolo_model(prefer_model)
             ckpt_path = getattr(model, 'ckpt_path', '') or ''
             if ckpt_path and os.path.isfile(ckpt_path):
                 shutil.copy2(ckpt_path, prefer_local)
@@ -1687,24 +1774,69 @@ class MainWindow(QMainWindow, WindowMixin):
         setattr(self, attr, picked)
         return picked
 
+    def _prompt_autolabel_settings(self):
+        """Model weights + conf / IoU thresholds (Choose Auto Label Model & first Auto Label)."""
+        from libs.annotate_dialogs import ChooseAutoLabelModelDialog
+
+        defaults = {
+            'weights': ustr(getattr(self, 'autolabel_weights', '') or ''),
+            'conf': float(self.autoLabelConf),
+            'pred_iou': float(self.autoLabelPredIou),
+            'dedup_iou': float(self.autoLabelDedupIou),
+        }
+        dlg = ChooseAutoLabelModelDialog(
+            self,
+            defaults=defaults,
+            weights_dir=os.path.join(APP_ROOT, 'weights'),
+            prefer_model=DEFAULT_DETECT_PT,
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return False
+
+        v = dlg.values()
+        raw_w = v.get('weights', '').strip()
+        if not raw_w:
+            QMessageBox.warning(self, u'Auto Label', u'请选择模型权重文件。')
+            return False
+
+        base = os.path.basename(raw_w.replace('\\', '/'))
+        if base == raw_w.replace('\\', '/') and raw_w.lower().endswith(('.pt', '.pth', '.h5')):
+            if base == DEFAULT_DETECT_PT or raw_w == DEFAULT_DETECT_PT:
+                resolved = self._ensure_preferred_weight(DEFAULT_DETECT_PT)
+            else:
+                resolved = resolve_yolo_checkpoint(raw_w, os.path.join(APP_ROOT, 'weights'))
+        elif os.path.isfile(raw_w):
+            resolved = raw_w
+        else:
+            candidate = os.path.join(APP_ROOT, 'weights', raw_w)
+            resolved = candidate if os.path.isfile(candidate) else raw_w
+
+        if not MainWindow._autolabel_weights_usable(resolved):
+            QMessageBox.warning(self, u'Auto Label', u'权重路径无效，请重新选择。')
+            return False
+
+        self.autolabel_weights = ustr(resolved)
+        self.autoLabelConf = float(v['conf'])
+        self.autoLabelPredIou = float(v['pred_iou'])
+        self.autoLabelDedupIou = float(v['dedup_iou'])
+        self.autoLabelSetupDone = True
+        self.autolabelWeightsUserConfirmed = True
+        self.settings[SETTING_AUTOLABEL_WEIGHTS_CONFIRMED] = True
+        self._persist_autolabel_settings()
+        return True
+
     def choose_autolabel_model(self):
         """Annotate-Tools: set YOLO weights for Auto Label current image (shortcut Q). Menu shortcut Ctrl+Shift+M."""
-        prev = ustr(getattr(self, 'autolabel_weights', '') or '').strip()
-        title = 'Auto Label model (current: %s):' % (
-            os.path.basename(prev) if prev else '(not set)')
-        wsel = self._select_model_weight(
-            title,
-            prefer_model=DEFAULT_DETECT_PT,
-            for_autolabel=True,
-            force_browse_default=False)
-        if not wsel:
+        if not self._prompt_autolabel_settings():
             return
-        self.autolabelWeightsUserConfirmed = True
-        self._persist_autolabel_settings()
         disp = ustr(self.autolabel_weights)
-        if len(disp) > 80:
-            disp = '…' + disp[-78:]
-        self.statusBar().showMessage('Auto Label model set: %s' % disp, 8000)
+        if len(disp) > 60:
+            disp = '…' + disp[-58:]
+        self.statusBar().showMessage(
+            'Auto Label: %s  conf=%.3f  pred_iou=%.2f  dedup=%.2f'
+            % (disp, self.autoLabelConf, self.autoLabelPredIou, self.autoLabelDedupIou),
+            10000,
+        )
 
     def auto_label_batch(self):
         """Annotate-Tools → Auto Label Batch: folder YOLO auto-label (detect/segment/pose)."""
@@ -1866,6 +1998,7 @@ class MainWindow(QMainWindow, WindowMixin):
         assert self.beginner()
         print('auto label current image')
         try:
+            self._push_undo_checkpoint()
             self.xml_folder_path = self.defaultSaveDir
             source = self.filePath
             xml_path = self.xmlPath
@@ -1878,52 +2011,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 or not getattr(self, 'autolabelWeightsUserConfirmed', False)
             )
             if need_weight_dialog:
-                wsel = self._select_model_weight(
-                    "Model weight for Auto Label (default %s):" % DEFAULT_DETECT_PT,
-                    prefer_model=DEFAULT_DETECT_PT,
-                    for_autolabel=True,
-                    force_browse_default=not getattr(self, 'autolabelWeightsUserConfirmed', False))
-                if not wsel:
+                if not self._prompt_autolabel_settings():
                     return
-                self.autolabelWeightsUserConfirmed = True
-                self.settings[SETTING_AUTOLABEL_WEIGHTS_CONFIRMED] = True
-                self.settings[SETTING_AUTOLABEL_WEIGHTS] = ustr(self.autolabel_weights)
-                self.settings.save()
 
-            if not self.autoLabelSetupDone:
-                conf_thres, ok = QInputDialog.getDouble(
-                    self,
-                    u'Auto Label 置信度',
-                    u'检测置信度阈值 conf（首次设置后将自动沿用；关闭前会写入设置文件）:',
-                    value=float(self.autoLabelConf),
-                    min=0.01,
-                    max=1.0,
-                    decimals=3)
-                if not ok:
-                    return
-                dedup_iou, ok = QInputDialog.getDouble(
-                    self,
-                    u'Auto Label 去重',
-                    u'同类框重叠去重 IoU 阈值（>阈值仅保留高分框；首次设置后将自动沿用）:',
-                    value=float(self.autoLabelDedupIou),
-                    min=0.1,
-                    max=0.99,
-                    decimals=2)
-                if not ok:
-                    return
-                self.autoLabelConf = float(conf_thres)
-                self.autoLabelDedupIou = float(dedup_iou)
-                self.autoLabelSetupDone = True
-                self._persist_autolabel_settings()
-            else:
-                conf_thres = float(self.autoLabelConf)
-                dedup_iou = float(self.autoLabelDedupIou)
+            conf_thres = float(self.autoLabelConf)
+            dedup_iou = float(self.autoLabelDedupIou)
 
             iou_thres = float(self.autoLabelPredIou)
+            torch = get_torch()
             if torch.cuda.is_available():
                 if torch.cuda.device_count() > 1:
                     gpuid, _, _ = get_cuda_setup(24,24)
-                    # print(torch.cuda.get_device_capability('cuda:2'))
                     device = torch.device("cuda:%d"%gpuid)
                     print(torch.cuda.device_count())
                 else:
@@ -1933,7 +2031,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # Load model and label name.
             w = resolve_yolo_checkpoint(self.autolabel_weights, os.path.join(APP_ROOT, 'weights'))
-            model = YOLO(w)  # load FP32 model
+            model = get_yolo_model(w)
             names = model.module.names if hasattr(model, 'module') else model.names
             # print('888:', names)
             result = model.predict(source=source, conf=conf_thres, iou=iou_thres)[0]
@@ -2047,11 +2145,20 @@ class MainWindow(QMainWindow, WindowMixin):
         item = self.currentItem()
         if not item:
             return
+        self._push_undo_checkpoint()
         if len(self.predefined_classes) > 0:
             self.labelDialog = LabelDialog(
                 parent=self, listItem=self.predefined_classes)
         
-        text = self.labelDialog.popUp(text=self.prevLabelText)#(item.text())
+        suggest = (self.prevLabelText or self.lastLabel or '').strip()
+        if not suggest and self.defaultLabelCombobox.count():
+            suggest = self.defaultLabelCombobox.currentText().strip()
+        text = self.labelDialog.popUp(
+            text=suggest,
+            focus_list=True,
+            list_click_accepts=True,
+            list_highlight=suggest,
+        )
 
             
         if text is not None:
@@ -2078,6 +2185,110 @@ class MainWindow(QMainWindow, WindowMixin):
         if filename:
             self.loadFile(filename)
 
+    def popFileListMenu(self, point):
+        item = self.fileListWidget.itemAt(point)
+        if item is not None:
+            self.fileListWidget.setCurrentItem(item)
+            if not self.fileListWidget.selectedItems():
+                item.setSelected(True)
+        if not self.fileListWidget.selectedItems():
+            return
+        self.fileListMenu.exec_(self.fileListWidget.mapToGlobal(point))
+
+    def _fileListContextOpen(self):
+        item = self.fileListWidget.currentItem()
+        if item:
+            self.fileitemDoubleClicked(item)
+
+    def _label_paths_for_image(self, img_path):
+        """All label file paths to remove for one image."""
+        paths = []
+        primary = self._guessLabelPathForImage(img_path)
+        if primary:
+            paths.append(primary)
+        base = os.path.splitext(os.path.basename(img_path))[0]
+        if self.defaultSaveDir and os.path.isdir(self.defaultSaveDir):
+            for ext in ('.txt', '.xml'):
+                p = os.path.join(self.defaultSaveDir, base + ext)
+                if os.path.isfile(p) and p not in paths:
+                    paths.append(p)
+        try:
+            p = Path(os.path.abspath(img_path))
+            parts = p.parts
+            for i, part in enumerate(parts):
+                if part.lower() != 'images' or i + 1 >= len(parts):
+                    continue
+                split = parts[i + 1]
+                root = Path(*parts[:i])
+                for ext in ('.txt', '.xml'):
+                    lbl = root / 'labels' / split / f'{base}{ext}'
+                    if lbl.is_file() and str(lbl) not in paths:
+                        paths.append(str(lbl))
+        except Exception:
+            pass
+        return paths
+
+    def deleteFilesFromFileList(self):
+        """Delete selected images and matching labels from disk (File list context menu)."""
+        items = self.fileListWidget.selectedItems()
+        if not items:
+            return
+
+        img_paths = []
+        for it in items:
+            p = it.data(Qt.UserRole)
+            p = ustr(p) if p else ustr(it.text()).split('  [')[0].strip()
+            if p and os.path.isfile(p):
+                img_paths.append(os.path.abspath(p))
+        if not img_paths:
+            QMessageBox.information(self, u'提示', u'未找到可删除的图像文件。')
+            return
+
+        cur_abs = os.path.abspath(self.filePath) if self.filePath else ''
+
+        removed_labels = []
+        errors = []
+        for img_path in img_paths:
+            for lbl in self._label_paths_for_image(img_path):
+                try:
+                    os.remove(lbl)
+                    removed_labels.append(lbl)
+                except Exception as exc:
+                    errors.append('%s: %s' % (lbl, exc))
+            try:
+                os.remove(img_path)
+            except Exception as exc:
+                errors.append('%s: %s' % (img_path, exc))
+                continue
+            if img_path in self.allImgList:
+                self.allImgList.remove(img_path)
+            self.fileAnnoMeta.pop(img_path, None)
+
+        if cur_abs in img_paths:
+            self.resetState()
+            self.setClean()
+            self.toggleActions(False)
+            self.canvas.setEnabled(False)
+            self.filePath = None
+
+        self.applyFileListFilters()
+
+        if self.mImgList and (not self.filePath or not os.path.isfile(self.filePath)):
+            self.loadFile(self.mImgList[0])
+        elif not self.mImgList:
+            self.closeFile()
+
+        msg = u'已删除 %d 张图像' % len(img_paths)
+        if removed_labels:
+            msg += u'，%d 个标注文件' % len(set(removed_labels))
+        self.statusBar().showMessage(msg, 8000)
+        if errors:
+            QMessageBox.warning(
+                self,
+                u'部分删除失败',
+                u'\n'.join(errors[:12]),
+            )
+
     def _setFileListItems(self, file_list, reasons_map=None):
         self.fileListWidget.clear()
         self.mImgList = list(file_list)
@@ -2091,16 +2302,64 @@ class MainWindow(QMainWindow, WindowMixin):
             item.setData(Qt.UserRole, imgPath)
             self.fileListWidget.addItem(item)
 
+    def _resolve_yolo_class_names(self):
+        """Class names for filters: in-memory list (Load Label Names) first, then classes.txt."""
+        if self.yolo_classes:
+            return [str(x).strip() for x in self.yolo_classes if str(x).strip()]
+        if self.predefined_classes:
+            return [str(x).strip() for x in self.predefined_classes if str(x).strip()]
+        names = []
+        if self.defaultSaveDir and os.path.isdir(self.defaultSaveDir):
+            classes_path = os.path.join(self.defaultSaveDir, 'classes.txt')
+            if os.path.isfile(classes_path):
+                try:
+                    with open(classes_path, 'r', encoding='utf-8') as f:
+                        names = [x.strip() for x in f.read().splitlines() if x.strip()]
+                except Exception:
+                    names = []
+        if not names and self.defaultSaveDir:
+            root = Path(self.defaultSaveDir).resolve()
+            for cand in (
+                root.parent.parent / 'classes.txt',
+                root.parent / 'classes.txt',
+            ):
+                if cand.is_file():
+                    try:
+                        with open(cand, 'r', encoding='utf-8') as f:
+                            names = [x.strip() for x in f.read().splitlines() if x.strip()]
+                    except Exception:
+                        names = []
+                    if names:
+                        break
+        return names
+
     def _guessLabelPathForImage(self, imgPath):
-        if not self.defaultSaveDir or (not os.path.isdir(self.defaultSaveDir)):
-            return None
         base = os.path.splitext(os.path.basename(imgPath))[0]
-        txt_path = os.path.join(self.defaultSaveDir, base + '.txt')
-        xml_path = os.path.join(self.defaultSaveDir, base + '.xml')
-        if os.path.isfile(txt_path):
-            return txt_path
-        if os.path.isfile(xml_path):
-            return xml_path
+        if self.defaultSaveDir and os.path.isdir(self.defaultSaveDir):
+            txt_path = os.path.join(self.defaultSaveDir, base + '.txt')
+            xml_path = os.path.join(self.defaultSaveDir, base + '.xml')
+            if os.path.isfile(txt_path):
+                return txt_path
+            if os.path.isfile(xml_path):
+                return xml_path
+
+        # YOLO layout: .../images/<split>/img.jpg -> .../labels/<split>/img.txt
+        try:
+            p = Path(os.path.abspath(imgPath))
+            parts = p.parts
+            for i, part in enumerate(parts):
+                if part.lower() != 'images' or i + 1 >= len(parts):
+                    continue
+                split = parts[i + 1]
+                root = Path(*parts[:i])
+                for lbl in (
+                    root / 'labels' / split / f'{base}.txt',
+                    root / 'labels' / split / f'{base}.xml',
+                ):
+                    if lbl.is_file():
+                        return str(lbl)
+        except Exception:
+            pass
         return None
 
     def _readFileAnnoMeta(self, imgPath):
@@ -2124,11 +2383,7 @@ class MainWindow(QMainWindow, WindowMixin):
             return meta
 
         # YOLO txt
-        classes_path = os.path.join(self.defaultSaveDir, 'classes.txt')
-        classes = []
-        if os.path.isfile(classes_path):
-            with open(classes_path, 'r', encoding='utf-8') as f:
-                classes = [x.strip() for x in f.read().splitlines()]
+        classes = self._resolve_yolo_class_names()
         with open(label_path, 'r', encoding='utf-8') as f:
             lines = f.read().splitlines()
         species = set()
@@ -2140,13 +2395,15 @@ class MainWindow(QMainWindow, WindowMixin):
                 continue
             count += 1
             try:
-                cid = int(parts[0])
+                cid = int(float(parts[0]))
                 if 0 <= cid < len(classes):
                     species.add(classes[cid])
+                elif classes:
+                    species.add(str(cid))
             except Exception:
                 pass
-            # score field exists in this project for auto-labeled YOLO lines (6th token for bbox lines)
-            if len(parts) == 6:
+            # Optional 6th field: auto-label confidence score
+            if len(parts) >= 6:
                 try:
                     scores.append(float(parts[5]))
                 except Exception:
@@ -2156,22 +2413,48 @@ class MainWindow(QMainWindow, WindowMixin):
         meta['count'] = count
         return meta
 
-    def rebuildFileAnnoMetaCache(self):
+    def rebuildFileAnnoMetaCache(self, report_progress=False):
         self.fileAnnoMeta = {}
-        for img_path in self.allImgList:
+        total = len(self.allImgList)
+        if total == 0:
+            return
+        progress = None
+        if report_progress and total > 80:
+            progress = QProgressDialog(
+                u'正在索引标注信息...', None, 0, total, self)
+            progress.setWindowTitle(u'加载中')
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setCancelButton(None)
+            progress.setValue(0)
+            progress.show()
+            QApplication.processEvents()
+        for i, img_path in enumerate(self.allImgList):
             try:
                 self.fileAnnoMeta[img_path] = self._readFileAnnoMeta(img_path)
             except Exception:
                 self.fileAnnoMeta[img_path] = {'species': set(), 'scores': [], 'count': 0}
+            if progress is not None and (i % 20 == 0 or i == total - 1):
+                progress.setValue(i + 1)
+                progress.setLabelText(
+                    u'正在索引标注信息... (%d/%d)' % (i + 1, total))
+                QApplication.processEvents()
+        if progress is not None:
+            progress.close()
 
     def refreshSpeciesFilterOptions(self):
         curr = self.fileSpeciesFilterCombo.currentText()
-        species_all = set()
-        for meta in self.fileAnnoMeta.values():
-            for s in meta.get('species', set()):
-                if s:
-                    species_all.add(s)
-        options = ['All species'] + sorted(species_all)
+        loaded = self._resolve_yolo_class_names()
+        if loaded:
+            # Match Load Label Names order exactly (no merge/sort with disk classes.txt)
+            options = ['All species'] + list(loaded)
+        else:
+            species_all = set()
+            for meta in self.fileAnnoMeta.values():
+                for s in meta.get('species', set()):
+                    if s:
+                        species_all.add(s)
+            options = ['All species'] + sorted(species_all)
         self.fileSpeciesFilterCombo.blockSignals(True)
         self.fileSpeciesFilterCombo.clear()
         self.fileSpeciesFilterCombo.addItems(options)
@@ -2191,27 +2474,38 @@ class MainWindow(QMainWindow, WindowMixin):
         count_active = self.fileCountFilterCheck.isChecked()
         count_thr = int(self.fileCountFilterSpin.value())
 
-        reasons_map = {}
+        has_any_scores = any(
+            meta.get('scores') for meta in self.fileAnnoMeta.values()
+        )
+        if score_active and not has_any_scores:
+            score_active = False
+
         if not (species_active or score_active or count_active):
-            self._setFileListItems(self.allImgList, reasons_map)
+            self._setFileListItems(self.allImgList, {})
             return
 
+        reasons_map = {}
         filtered = []
         for img_path in self.allImgList:
             meta = self.fileAnnoMeta.get(img_path, {'species': set(), 'scores': [], 'count': 0})
-            hit_species = species_active and (selected_species in meta.get('species', set()))
-            hit_score = score_active and any((s < score_thr) for s in meta.get('scores', []))
-            hit_count = count_active and (int(meta.get('count', 0)) > count_thr)
-            if hit_species or hit_score or hit_count:
-                filtered.append(img_path)
-                tags = []
-                if hit_species:
-                    tags.append('species')
-                if hit_score:
-                    tags.append('low-score')
-                if hit_count:
-                    tags.append('many-boxes')
-                reasons_map[img_path] = tags
+            ok = True
+            if species_active:
+                ok = ok and (selected_species in meta.get('species', set()))
+            if score_active:
+                ok = ok and any((s < score_thr) for s in meta.get('scores', []))
+            if count_active:
+                ok = ok and (int(meta.get('count', 0)) > count_thr)
+            if not ok:
+                continue
+            filtered.append(img_path)
+            tags = []
+            if species_active:
+                tags.append('species')
+            if score_active:
+                tags.append('low-score')
+            if count_active:
+                tags.append('many-boxes')
+            reasons_map[img_path] = tags
         self._setFileListItems(filtered, reasons_map)
 
     # Add chris
@@ -2402,6 +2696,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def copySelectedShape(self):
         self.addLabel(self.canvas.copySelectedShape())
+        self.setDirty()
         # fix copy and delete
         self.shapeSelectionChanged(True)
     
@@ -2625,6 +2920,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if self.labelFile:
                 self.loadLabels(self.labelFile.shapes)
             self.setClean()
+            self._clear_undo_stacks()
             self.canvas.setEnabled(True)
             self.adjustScale(initial=True)
             self.paintCanvas()
@@ -2898,10 +3194,18 @@ class MainWindow(QMainWindow, WindowMixin):
         self.lastOpenDir = dirpath
         self.dirname = dirpath
         self.filePath = None
-        self.allImgList = self.scanAllImages(dirpath)
-        self.rebuildFileAnnoMetaCache()
-        self.refreshSpeciesFilterOptions()
-        self.applyFileListFilters()
+        self._startup_pulse('正在扫描图像目录...')
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.allImgList = self.scanAllImages(dirpath)
+            self.status(u'找到 %d 张图像，正在加载标注索引...' % len(self.allImgList))
+            self.rebuildFileAnnoMetaCache(report_progress=True)
+            self.refreshSpeciesFilterOptions()
+            self.applyFileListFilters()
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._startup_pulse('正在打开图像...')
+            QApplication.processEvents()
 
         if not self.mImgList:
             return
@@ -2912,6 +3216,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.loadFile(startupImage)
         else:
             self.openNextImg()
+        if self.allImgList:
+            self.status(u'已加载 %d 张图像' % len(self.allImgList), 6000)
 
     def verifyImg(self, _value=False):
         # Proceding next image without dialog if having any label
@@ -3137,11 +3443,13 @@ class MainWindow(QMainWindow, WindowMixin):
             self.setDirty()
 
     def copyShape(self):
+        self._push_undo_checkpoint()
         self.canvas.endMove(copy=True)
         self.addLabel(self.canvas.selectedShape)
         self.setDirty()
 
     def moveShape(self):
+        self._push_undo_checkpoint()
         self.canvas.endMove(copy=False)
         self.setDirty()
 
@@ -3160,6 +3468,10 @@ class MainWindow(QMainWindow, WindowMixin):
             self.default_label = first
         self.yolo_classes = list(classes)
         self.labelDialog = LabelDialog(parent=self, listItem=classes)
+        if self.allImgList:
+            self.rebuildFileAnnoMetaCache()
+            self.refreshSpeciesFilterOptions()
+            self.applyFileListFilters()
 
     def loadPredefinedClasses(self, predefClassesFile):
         if not os.path.isfile(predefClassesFile):
@@ -5408,7 +5720,7 @@ def read(filename, default=None):
         return default
 
 
-def get_main_app(argv=[]):
+def get_main_app(argv=[], splash=None):
     """
     Standard boilerplate Qt application code.
     Do everything but app.exec_() -- so that we can test the application in one thread
@@ -5446,9 +5758,11 @@ def get_main_app(argv=[]):
             print(f"ALT: {exc}", file=sys.stderr)
             sys.exit(2)
 
-    set_windows_app_user_model_id('Brigchen.AutoLabelTool.ALT.1')
-    app = QApplication(argv)
-    app.setApplicationName(__appname__)
+    app = QApplication.instance()
+    if app is None:
+        set_windows_app_user_model_id('Brigchen.AutoLabelTool.ALT.1')
+        app = QApplication(argv)
+        app.setApplicationName(__appname__)
     icon = load_brand_qicon(APP_ROOT, 'app')
     if icon.isNull():
         icon = newIcon('app')
@@ -5458,16 +5772,22 @@ def get_main_app(argv=[]):
         os.path.dirname(sys.argv[0]), 'datasets', 'predefined_classes.txt')
     default_save = cli_label or args.save_dir
     win = MainWindow(args.image, default_predef, default_save,
-                     cli_image_dir=cli_image, cli_label_dir=cli_label)
+                     cli_image_dir=cli_image, cli_label_dir=cli_label,
+                     splash=splash)
     win.setWindowIcon(icon)
     win.show()
+    if splash is not None:
+        splash.process_events()
     return app, win
 
 
 def main():
-    '''construct main app and run it'''
-    app, _win = get_main_app(sys.argv)
-    return app.exec_()
+    '''construct main app and run it (splash shown via alt_boot).'''
+    _src_dir = os.path.dirname(os.path.abspath(__file__))
+    if _src_dir not in sys.path:
+        sys.path.insert(0, _src_dir)
+    from alt_boot import run
+    return run()
 
 if __name__ == '__main__':
     sys.exit(main())
