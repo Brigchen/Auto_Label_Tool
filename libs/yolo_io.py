@@ -13,7 +13,12 @@ TXT_EXT = '.txt'
 ENCODE_METHOD = DEFAULT_ENCODING
 
 def split_yolo_difficult_and_score(d) -> tuple:
-    """Map shape ``difficult`` field to ``(voc_difficult, detection_score)``."""
+    """Map shape ``difficult`` field to ``(voc_difficult, detection_score)``.
+    
+    For confidence scores (0.0 < score <= 1.0):
+    - score > 0.5: high confidence -> voc_difficult=False (not difficult)
+    - score <= 0.5: low confidence -> voc_difficult=True (difficult)
+    """
     if isinstance(d, bool):
         return d, None
     if isinstance(d, float):
@@ -21,7 +26,9 @@ def split_yolo_difficult_and_score(d) -> tuple:
         if fv == 0.0:
             return False, None
         if 0.0 < fv <= 1.0:
-            return False, fv
+            # Treat as confidence score: high conf (>0.5) -> not difficult
+            voc_difficult = fv <= 0.5
+            return voc_difficult, fv
         return bool(d), None
     if isinstance(d, int):
         return bool(d), None

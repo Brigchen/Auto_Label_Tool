@@ -57,7 +57,19 @@ class LabelFile(object):
             points = shape['points']
             label = shape['label']
             # Add Chris
-            difficult = int(shape['difficult'])
+            # Convert difficult: score > 0.5 -> difficult=0, score <= 0.5 -> difficult=1
+            raw_difficult = shape['difficult']
+            if isinstance(raw_difficult, bool):
+                difficult = int(raw_difficult)
+            elif isinstance(raw_difficult, (int, float)):
+                fv = float(raw_difficult)
+                if 0.0 < fv <= 1.0:
+                    # Treat as confidence score: high conf (>0.5) -> not difficult (0)
+                    difficult = 0 if fv > 0.5 else 1
+                else:
+                    difficult = int(bool(fv))
+            else:
+                difficult = 0
             bndbox = LabelFile.convertPoints2BndBox(points)
             writer.addBndBox(bndbox[0], bndbox[1], bndbox[2], bndbox[3], label, difficult)
 
