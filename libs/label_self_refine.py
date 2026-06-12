@@ -193,7 +193,7 @@ def refine_one_image(
         if rules.drop_low_score and score is not None and score < rules.min_score_keep:
             actions.append(RefineAction(
                 image_path, label_path, split, "drop_low_score",
-                f"score {score:.3f} < {rules.min_score_keep:.3f}",
+                f"{gt_box.name}: score {score:.3f} < {rules.min_score_keep:.3f}",
                 old_line, "",
             ))
             continue
@@ -202,13 +202,15 @@ def refine_one_image(
             if rules.drop_unmatched_gt:
                 actions.append(RefineAction(
                     image_path, label_path, split, "drop_unmatched_gt",
-                    "no matching prediction", old_line, "",
+                    f"{gt_box.name}: no matching prediction",
+                    old_line, "",
                 ))
                 continue
             needs_review = True
             actions.append(RefineAction(
                 image_path, label_path, split, "review_fn",
-                "GT box unmatched (possible漏标 or hard sample)", old_line, old_line,
+                f"{gt_box.name}: GT unmatched (possible漏标 or hard sample)",
+                old_line, old_line,
             ))
             keep_boxes.append(gt_box)
             continue
@@ -243,7 +245,7 @@ def refine_one_image(
             prop_lines = _boxes_to_lines([proposed], img_w, img_h, save_score=True)
             actions.append(RefineAction(
                 image_path, label_path, split, "review_class",
-                f"class mismatch, pred conf {pred.conf:.3f} < fix threshold",
+                f"{gt_box.name} -> {pred.name} (IoU={iou:.2f}, conf={pred.conf:.3f} < fix_threshold)",
                 old_line,
                 prop_lines[0] if prop_lines else old_line,
             ))
