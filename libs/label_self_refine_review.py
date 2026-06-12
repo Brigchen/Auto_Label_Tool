@@ -83,11 +83,17 @@ def build_review_manifest(
     weights: str = "",
     csv_path: Optional[str] = None,
     pred_map: Optional[Dict[str, List[Box]]] = None,
-    max_previews: int = 200,
+    max_previews: int = 0,  # 0 means unlimited (all applicable items get preview)
     log: LogFn = print,
     progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> Dict[str, Any]:
-    """Build or refresh interactive review manifest (GT+pred, full new_line)."""
+    """Build or refresh interactive review manifest (GT+pred, full new_line).
+    
+    Args:
+        max_previews: Maximum number of preview images to generate.
+            0 or negative means unlimited (generate preview for ALL applicable items).
+            This is important for interactive review - users need to see all samples.
+    """
     out_dir = str(Path(out_dir).resolve())
     csv_path = csv_path or os.path.join(out_dir, "label_self_refine_report.csv")
     manifest_path = os.path.join(out_dir, MANIFEST_NAME)
@@ -135,7 +141,8 @@ def build_review_manifest(
     preview_dir = Path(out_dir) / "html_preview"
     preview_dir.mkdir(parents=True, exist_ok=True)
     preview_count = 0
-    preview_cap = max(0, int(max_previews))
+    # 0 or negative means unlimited previews for interactive review
+    preview_cap = max_previews if max_previews > 0 else 999999
 
     for idx, a in enumerate(candidates):
         if progress and idx % 50 == 0:
@@ -176,6 +183,7 @@ def build_review_manifest(
             elif a.action == "add_pred" and preds:
                 new_line = _line_for_box(preds[0], img_w, img_h)
 
+        # Generate preview for ALL applicable items (interactive review needs full preview)
         preview_rel = ""
         want_preview = (
             applicable
@@ -220,11 +228,12 @@ def build_review_manifest(
         "weights": weights,
         "names": {str(k): v for k, v in names.items()},
         "items": items,
+        "preview_count": preview_count,  # Track how many previews generated
     }
     Path(manifest_path).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8",
     )
-    log(f"复核清单: {manifest_path} ({len(items)} 条)")
+    log(f"复核清单: {manifest_path} ({len(items)} 条, {preview_count} 张预览)")
     return manifest
 
 
