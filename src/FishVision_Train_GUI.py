@@ -1745,9 +1745,19 @@ class TabbedTrainGUI(QWidget):
         review_html = os.path.join(report_dir, "review.html")
         manifest = os.path.join(report_dir, "label_self_refine_review.json")
 
-        if opts.get("open_interactive_review") and os.path.isfile(manifest):
+        if opts.get("open_interactive_review"):
             try:
-                from libs.label_self_refine_review import RefineReviewServer
+                from libs.label_self_refine_review import build_review_manifest, RefineReviewServer
+                # Always rebuild manifest to ensure all previews are generated
+                if os.path.isfile(manifest):
+                    self._on_refine_log("重建交互复核清单（全部预览）…")
+                build_review_manifest(
+                    report_dir,
+                    data_yaml=opts.get("data_yaml", ""),
+                    weights=opts.get("weights", ""),
+                    max_previews=0,  # unlimited previews for review
+                    log=lambda m: self._on_refine_log(f"  {m}"),
+                )
                 self._refine_review_server = RefineReviewServer(report_dir)
                 url = self._refine_review_server.start(open_browser=True)
                 msg += f"\n\n交互复核: {url}"

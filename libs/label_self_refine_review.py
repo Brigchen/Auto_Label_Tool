@@ -239,6 +239,19 @@ def build_review_manifest(
 
 def _write_review_html(out_dir: str) -> str:
     html_path = os.path.join(out_dir, REVIEW_HTML)
+    
+    # Load manifest JSON to embed inline for static mode fallback
+    manifest_path = os.path.join(out_dir, MANIFEST_NAME)
+    embedded_json = "null"
+    if os.path.isfile(manifest_path):
+        try:
+            raw = Path(manifest_path).read_text(encoding="utf-8")
+            # Validate it's parseable JSON
+            json.loads(raw)
+            embedded_json = raw
+        except (json.JSONDecodeError, OSError):
+            pass
+    
     doc = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"/>
 <title>标注自修正 · 交互复核</title>
@@ -323,9 +336,11 @@ button.danger { background: #c62828; color: #fff; border-color: #c62828; }
   <div class="lb-hint">点击空白处或按 Esc 关闭</div>
 </div>
 <script>
+// Embedded manifest data (for static file mode fallback)
+const EMBEDDED = """ + embedded_json + """;
+
 // Detect mode: server API vs static file
 let hasServer = false;
-let baseDir = '';
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -339,7 +354,6 @@ async function detectMode() {
     const r = await fetch('/api/manifest');
     if (r.ok) { hasServer = true; return; }
   } catch(e) {}
-  // Static mode: load manifest JSON from same directory
   hasServer = false;
 }
 
@@ -387,9 +401,7 @@ function filterItems(items) {
 }
 function resolvePreviewSrc(previewRel) {
   if (!previewRel) return '';
-  // Server mode: absolute path from root
   if (hasServer) return '/' + previewRel;
-  // Static mode: relative to HTML file location
   return previewRel;
 }
 function render() {
@@ -397,8 +409,9 @@ function render() {
   const items = filterItems(manifest.items || []);
   const pending = (manifest.items||[]).filter(x => x.status==='pending' && x.applicable).length;
   const applied = (manifest.items||[]).filter(x => x.status==='applied').length;
+  const totalPreview = (manifest.items||[]).filter(x => x.preview_rel).length;
   document.getElementById('counts').textContent =
-    `共 ${manifest.items.length} 条 | 待处理 ${pending} | 已应用 ${applied}`;
+    `共 ${manifest.items.length} 条 (${totalPreview} 预览) | 待处理 ${pending} | 已应用 ${applied}`;
   const list = document.getElementById('list');
   list.innerHTML = '';
   items.forEach(it => {
@@ -440,12 +453,11 @@ async function load() {
   try {
     if (hasServer) {
       manifest = await api('/api/manifest');
+    } else if (EMBEDDED && EMBEDDED.items) {
+      manifest = EMBEDDED;
     } else {
-      // Static mode: load JSON from same directory as this HTML file
-      const jsonUrl = 'label_self_refine_review.json';
-      const r = await fetch(jsonUrl);
-      if (!r.ok) throw new Error('Cannot load ' + jsonUrl + ': ' + r.status);
-      manifest = await r.json();
+      document.getElementById('status').textContent = '错误: 无数据。请通过 Trainer 重新运行标注自修正。';
+      return;
     }
   } catch(e) {
     document.getElementById('status').textContent = '加载失败: ' + e.message;
@@ -496,7 +508,7 @@ document.getElementById('btn-apply-all').onclick = applyAllFix;
     banner.innerHTML = '✅ 服务器模式 — 可交互确认/跳过修正';
   } else {
     banner.className = 'mode-banner';
-    banner.innerHTML = '⚠️ 静态浏览模式 — 仅查看，无法交互操作。如需确认修正，请通过 Trainer 启动交互复核服务器。';
+    banner.innerHTML = '⚠️ 静态浏览模式 — 仅查看，无法交互。如需确认修正，请通过 Trainer 启动交互复核。';
   }
   banner.style.display = 'block';
   await load();
