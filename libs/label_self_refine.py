@@ -674,7 +674,7 @@ def run_label_self_refine(
                 data_yaml=data_yaml,
                 weights=weights,
                 pred_map=pred_map,
-                max_previews=200,
+                max_previews=0,
                 log=log,
                 progress=progress,
             )

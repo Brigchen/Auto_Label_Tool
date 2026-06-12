@@ -255,6 +255,9 @@ button.danger { background: #c62828; color: #fff; border-color: #c62828; }
 .legend .gt { color: #0a0; font-weight: bold; }
 .legend .pred { color: #c00; font-weight: bold; }
 #status { font-size: 13px; color: #333; }
+.mode-banner { background: #fff3e0; border: 1px solid #ffb74d; padding: 10px 16px;
+  border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
+.mode-banner.server { background: #e8f5e9; border-color: #66bb6a; }
 .card { background: #fff; border-radius: 8px; margin-bottom: 12px; padding: 12px;
   box-shadow: 0 1px 3px rgba(0,0,0,.06); display: grid; grid-template-columns: 390px 1fr; gap: 16px; }
 .card.applied { opacity: .65; background: #f1f8e9; }
@@ -298,6 +301,7 @@ button.danger { background: #c62828; color: #fff; border-color: #c62828; }
 .filters label { margin-right: 12px; font-size: 13px; }
 </style></head><body>
 <h1>标注自修正 · 交互复核</h1>
+<div id="mode-banner" class="mode-banner" style="display:none"></div>
 <p class="legend"><span class="gt">■ 绿框 = GT</span> &nbsp; <span class="pred">■ 红框 = 预测</span>
  &nbsp; 点击「确认修正」将写回对应 labels/*.txt（自动备份到 .label_refine_backup/）</p>
 <div class="toolbar">
@@ -319,12 +323,26 @@ button.danger { background: #c62828; color: #fff; border-color: #c62828; }
   <div class="lb-hint">点击空白处或按 Esc 关闭</div>
 </div>
 <script>
-const API = '';
+// Detect mode: server API vs static file
+let hasServer = false;
+let baseDir = '';
+
 async function api(path, opts) {
-  const r = await fetch(API + path, opts);
+  const r = await fetch(path, opts);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+
+// Try to detect if we're served by the review server
+async function detectMode() {
+  try {
+    const r = await fetch('/api/manifest');
+    if (r.ok) { hasServer = true; return; }
+  } catch(e) {}
+  // Static mode: load manifest JSON from same directory
+  hasServer = false;
+}
+
 let manifest = null;
 
 function openLightbox(src) {
@@ -336,21 +354,17 @@ function openLightbox(src) {
 }
 function closeLightbox() {
   const lb = document.getElementById('lightbox');
-  const img = document.getElementById('lightbox-img');
   lb.classList.remove('open');
-  img.removeAttribute('src');
+  document.getElementById('lightbox-img').removeAttribute('src');
   document.body.style.overflow = '';
 }
 document.getElementById('lightbox').addEventListener('click', (e) => {
   if (e.target.id === 'lightbox' || e.target.id === 'lightbox-img') closeLightbox();
 });
 document.querySelector('#lightbox .lb-close').addEventListener('click', (e) => {
-  e.stopPropagation();
-  closeLightbox();
+  e.stopPropagation(); closeLightbox();
 });
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeLightbox();
-});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
 
 function actionLabel(a) {
   const m = {fix_class:'修正类别',drop_low_score:'删除低分',drop_unmatched_gt:'删除无匹配',
@@ -371,6 +385,13 @@ function filterItems(items) {
     return true;
   });
 }
+function resolvePreviewSrc(previewRel) {
+  if (!previewRel) return '';
+  // Server mode: absolute path from root
+  if (hasServer) return '/' + previewRel;
+  // Static mode: relative to HTML file location
+  return previewRel;
+}
 function render() {
   if (!manifest) return;
   const items = filterItems(manifest.items || []);
@@ -383,10 +404,11 @@ function render() {
   items.forEach(it => {
     const div = document.createElement('div');
     div.className = 'card' + (it.status==='applied'?' applied': it.status==='skipped'?' skipped':'');
-    const img = it.preview_rel
-      ? `<div class="preview-wrap"><img class="preview-thumb" src="/${it.preview_rel}" alt="preview" title="点击放大查看"/></div>`
+    const previewSrc = resolvePreviewSrc(it.preview_rel);
+    const img = previewSrc
+      ? `<div class="preview-wrap"><img class="preview-thumb" src="${esc(previewSrc)}" alt="preview" title="点击放大查看"/></div>`
       : '<div style="color:#888;padding:40px 0;text-align:center">无预览</div>';
-    const canApply = it.status === 'pending' && it.applicable;
+    const canApply = hasServer && it.status === 'pending' && it.applicable;
     div.innerHTML = `
       <div>${img}</div>
       <div class="meta">
@@ -398,7 +420,7 @@ function render() {
         ${it.new_line ? '<div>新: <code>'+esc(it.new_line)+'</code></div>' : ''}
         <div style="margin-top:8px">
           <button class="primary" data-apply="${it.id}" ${canApply?'':'disabled'}>确认修正</button>
-          <button data-skip="${it.id}" ${it.status==='pending'?'':'disabled'}>跳过</button>
+          <button data-skip="${it.id}" ${hasServer && it.status==='pending'?'':'disabled'}>跳过</button>
         </div>
       </div>`;
     list.appendChild(div);
@@ -410,18 +432,29 @@ function render() {
     btn.onclick = () => skipOne(btn.dataset.skip);
   });
   list.querySelectorAll('img.preview-thumb').forEach(el => {
-    el.onclick = (e) => {
-      e.stopPropagation();
-      openLightbox(el.src);
-    };
+    el.onclick = (e) => { e.stopPropagation(); openLightbox(el.src); };
   });
 }
-function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
 async function load() {
-  manifest = await api('/api/manifest');
+  try {
+    if (hasServer) {
+      manifest = await api('/api/manifest');
+    } else {
+      // Static mode: load JSON from same directory as this HTML file
+      const jsonUrl = 'label_self_refine_review.json';
+      const r = await fetch(jsonUrl);
+      if (!r.ok) throw new Error('Cannot load ' + jsonUrl + ': ' + r.status);
+      manifest = await r.json();
+    }
+  } catch(e) {
+    document.getElementById('status').textContent = '加载失败: ' + e.message;
+    return;
+  }
   render();
 }
 async function applyOne(id) {
+  if (!hasServer) return;
   setStatus('应用中…');
   try {
     manifest = await api('/api/apply/' + id, {method:'POST'});
@@ -430,10 +463,12 @@ async function applyOne(id) {
   } catch(e) { setStatus('失败: ' + e.message); }
 }
 async function skipOne(id) {
+  if (!hasServer) return;
   manifest = await api('/api/skip/' + id, {method:'POST'});
   render();
 }
 async function applyAllFix() {
+  if (!hasServer) return;
   setStatus('批量应用中…');
   try {
     manifest = await api('/api/apply-batch', {
@@ -451,7 +486,21 @@ document.getElementById('btn-apply-all').onclick = applyAllFix;
 ['f-fix','f-drop','f-review','f-hide-done'].forEach(id => {
   document.getElementById(id).onchange = render;
 });
-load();
+
+// Initialize: detect mode then load
+(async function init() {
+  await detectMode();
+  const banner = document.getElementById('mode-banner');
+  if (hasServer) {
+    banner.className = 'mode-banner server';
+    banner.innerHTML = '✅ 服务器模式 — 可交互确认/跳过修正';
+  } else {
+    banner.className = 'mode-banner';
+    banner.innerHTML = '⚠️ 静态浏览模式 — 仅查看，无法交互操作。如需确认修正，请通过 Trainer 启动交互复核服务器。';
+  }
+  banner.style.display = 'block';
+  await load();
+})();
 </script></body></html>"""
     Path(html_path).write_text(doc, encoding="utf-8")
     return html_path
