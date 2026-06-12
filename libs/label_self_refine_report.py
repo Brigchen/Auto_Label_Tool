@@ -236,13 +236,12 @@ def write_refine_html_report(
     data_yaml: str = "",
     weights: str = "",
     dry_run: Optional[bool] = None,
-    max_preview: int = 10,  # Reduced from 36 to 10 for summary only
+    max_preview: int = 10,  # 10 examples per action type
     log: LogFn = print,
 ) -> str:
     """Build index.html from label_self_refine_report.csv.
     
-    Simplified version: only shows statistics summary and diagnosis.
-    For detailed sample preview, use interactive review (review.html).
+    Shows statistics summary + 10 examples per action type.
     Returns html path.
     """
     out_dir = str(Path(out_dir).resolve())
@@ -262,10 +261,9 @@ def write_refine_html_report(
     preview_dir.mkdir(parents=True, exist_ok=True)
     used_preview: Set[str] = set()
 
-    # Only render a few representative samples for quick visual check
-    def _samples_html(sample_actions: List[CsvAction], limit: int) -> str:
+    def _samples_html(sample_actions: List[CsvAction]) -> str:
         rows = []
-        for i, a in enumerate(sample_actions[:limit], start=1):
+        for i, a in enumerate(sample_actions, start=1):
             rel = _render_gt_preview(a, names, preview_dir, used_preview)
             if rel:
                 vis = (
@@ -278,14 +276,30 @@ def write_refine_html_report(
                 f"<tr><td>{i}</td><td>{vis}</td>"
                 f"<td>{html.escape(os.path.basename(a.image_path))}</td>"
                 f"<td>{html.escape(a.split)}</td>"
-                f"<td>{html.escape(_action_label(a.action))}</td>"
-                f"<td>{html.escape(a.detail[:60])}...</td></tr>"
+                f"<td>{html.escape(a.detail[:80]) if a.detail else '—'}</td></tr>"
             )
-        return "".join(rows) if rows else "<tr><td colspan='6'>无</td></tr>"
+        return "".join(rows) if rows else "<tr><td colspan='5'>无</td></tr>"
 
-    # Pick only a few representative samples (not full preview)
-    review_samples = _pick_samples(actions, "review", max_preview)
-    fix_samples = _pick_samples(actions, "fix_class", min(5, max_preview))
+    # Pick 10 samples per action type
+    action_types = [
+        ("fix_class", "修正类别"),
+        ("drop_low_score", "删除低分标注"),
+        ("drop_unmatched_gt", "删除无匹配GT"),
+        ("add_pred", "新增预测框"),
+        ("review_class", "待复核：类别不一致"),
+        ("review_fn", "待复核：漏检"),
+    ]
+    action_sections = []
+    for action_key, action_label in action_types:
+        samples = _pick_samples(actions, action_key, max_preview)
+        if samples:
+            cnt = analysis.action_counts.get(action_key, 0)
+            action_sections.append(f"""
+<div class="card"><h2>{action_label} ({cnt} 条)</h2>
+<p class="preview-note">展示前 {len(samples)} 个代表性样本</p>
+<table><tr><th>#</th><th>预览</th><th>文件</th><th>split</th><th>详情</th></tr>
+{_samples_html(samples)}
+</table></div>""")
 
     total_images = int(summary_meta.get("images") or analysis.images_in_csv)
     labels_changed = int(summary_meta.get("labels_changed") or analysis.images_changed)
@@ -331,11 +345,6 @@ def write_refine_html_report(
             for k, v in rules.items()
         ) + "</ul>"
 
-    review_queue = os.path.join(out_dir, "review_queue")
-    has_review = os.path.isdir(review_queue)
-    review_html_path = os.path.join(out_dir, "review.html")
-    has_review_html = os.path.isfile(review_html_path)
-
     findings = []
     if review_n > 0:
         pct = 100.0 * review_n / max(total_images, 1)
@@ -363,26 +372,7 @@ def write_refine_html_report(
         if findings else "<p>无</p>"
     )
 
-    # Interactive review button section
-    review_section = ""
-    if has_review_html:
-        review_section = f"""
-<div class="card" style="background:#e8f5e9;">
-<h2>交互复核</h2>
-<p>已生成 <code>review.html</code>，可在浏览器中逐条确认/跳过修正。</p>
-<p><button onclick="window.open('review.html', '_blank')" style="padding:10px 20px;font-size:16px;">
-打开交互复核页面
-</button></p>
-<p style="color:#666;font-size:13px;">提示：交互复核需启动本地HTTP服务器（端口8765+），
-或直接在浏览器中打开静态页面查看。</p>
-</div>"""
-    elif has_review:
-        review_section = f"""
-<div class="card" style="background:#fff3e0;">
-<h2>复核队列已导出</h2>
-<p><code>review_queue/</code> 包含 {review_n} 个待复核样本。</p>
-<p>运行「Open Interactive Review」可启动交互复核服务器。</p>
-</div>"""
+    action_sections_html = "".join(action_sections)
 
     index_path = os.path.join(out_dir, "index.html")
     doc = f"""<!DOCTYPE html>
@@ -400,11 +390,9 @@ h1,h2 {{ color: #333; }}
 table {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
 th, td {{ border: 1px solid #ddd; padding: 8px; vertical-align: top; }}
 th {{ background: #eee; }}
-.legend {{ font-size: 13px; color: #555; }}
-.gt {{ color: #0a0; font-weight: bold; }}
 .findings li {{ line-height: 1.55; }}
 code {{ font-size: 12px; word-break: break-all; }}
-.preview-note {{ color:#888;font-size:12px;margin-top:8px; }}
+.preview-note {{ color:#888;font-size:12px;margin-top:4px; }}
 </style></head><body>
 <h1>标注自修正报告 (Label Self-Refine)</h1>
 <div class="card">
@@ -412,8 +400,7 @@ code {{ font-size: 12px; word-break: break-all; }}
 <p>数据集: <code>{html.escape(data_yaml or '—')}</code></p>
 <p>报告目录: <code>{html.escape(out_dir)}</code></p>
 <p>CSV: <code>{html.escape(os.path.basename(csv_path))}</code>
-| JSON: <code>label_self_refine_summary.json</code>
-{" | review_queue: 已导出" if has_review else ""}</p>
+| JSON: <code>label_self_refine_summary.json</code></p>
 <div class="metrics">
   <div class="metric"><b>{total_images}</b>评估图像</div>
   <div class="metric"><b>{labels_changed}</b>将改/已改文件</div>
@@ -437,12 +424,7 @@ code {{ font-size: 12px; word-break: break-all; }}
 {"".join(pair_rows) if pair_rows else "<tr><td colspan='3'>无</td></tr>"}
 </table></div>
 {"<div class='card'><h2>规则参数</h2>" + rules_txt + "</div>" if rules_txt else ""}
-{review_section}
-<div class="card"><h2>代表性样本预览（前{max_preview}条）</h2>
-<p class="preview-note">仅展示少量代表性样本。完整预览请使用交互复核。</p>
-<table><tr><th>#</th><th>预览</th><th>文件</th><th>split</th><th>类型</th><th>详情</th></tr>
-{_samples_html(review_samples + fix_samples, max_preview)}
-</table></div>
+{action_sections_html}
 </body></html>"""
 
     Path(index_path).write_text(doc, encoding="utf-8")

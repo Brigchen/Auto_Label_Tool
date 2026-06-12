@@ -239,19 +239,6 @@ def build_review_manifest(
 
 def _write_review_html(out_dir: str) -> str:
     html_path = os.path.join(out_dir, REVIEW_HTML)
-    
-    # Load manifest JSON to embed inline for static mode fallback
-    manifest_path = os.path.join(out_dir, MANIFEST_NAME)
-    embedded_json = "null"
-    if os.path.isfile(manifest_path):
-        try:
-            raw = Path(manifest_path).read_text(encoding="utf-8")
-            # Validate it's parseable JSON
-            json.loads(raw)
-            embedded_json = raw
-        except (json.JSONDecodeError, OSError):
-            pass
-    
     doc = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"/>
 <title>标注自修正 · 交互复核</title>
@@ -263,14 +250,10 @@ h1 { margin: 0 0 8px; }
 button { cursor: pointer; padding: 6px 14px; border-radius: 4px; border: 1px solid #ccc; background: #fff; }
 button.primary { background: #1565c0; color: #fff; border-color: #1565c0; }
 button:disabled { opacity: .5; cursor: not-allowed; }
-button.danger { background: #c62828; color: #fff; border-color: #c62828; }
 .legend { font-size: 13px; color: #555; }
 .legend .gt { color: #0a0; font-weight: bold; }
 .legend .pred { color: #c00; font-weight: bold; }
 #status { font-size: 13px; color: #333; }
-.mode-banner { background: #fff3e0; border: 1px solid #ffb74d; padding: 10px 16px;
-  border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
-.mode-banner.server { background: #e8f5e9; border-color: #66bb6a; }
 .card { background: #fff; border-radius: 8px; margin-bottom: 12px; padding: 12px;
   box-shadow: 0 1px 3px rgba(0,0,0,.06); display: grid; grid-template-columns: 390px 1fr; gap: 16px; }
 .card.applied { opacity: .65; background: #f1f8e9; }
@@ -314,7 +297,6 @@ button.danger { background: #c62828; color: #fff; border-color: #c62828; }
 .filters label { margin-right: 12px; font-size: 13px; }
 </style></head><body>
 <h1>标注自修正 · 交互复核</h1>
-<div id="mode-banner" class="mode-banner" style="display:none"></div>
 <p class="legend"><span class="gt">■ 绿框 = GT</span> &nbsp; <span class="pred">■ 红框 = 预测</span>
  &nbsp; 点击「确认修正」将写回对应 labels/*.txt（自动备份到 .label_refine_backup/）</p>
 <div class="toolbar">
@@ -336,11 +318,7 @@ button.danger { background: #c62828; color: #fff; border-color: #c62828; }
   <div class="lb-hint">点击空白处或按 Esc 关闭</div>
 </div>
 <script>
-// Embedded manifest data (for static file mode fallback)
-const EMBEDDED = """ + embedded_json + """;
-
-// Detect mode: server API vs static file
-let hasServer = false;
+let manifest = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -348,27 +326,14 @@ async function api(path, opts) {
   return r.json();
 }
 
-// Try to detect if we're served by the review server
-async function detectMode() {
-  try {
-    const r = await fetch('/api/manifest');
-    if (r.ok) { hasServer = true; return; }
-  } catch(e) {}
-  hasServer = false;
-}
-
-let manifest = null;
-
 function openLightbox(src) {
   const lb = document.getElementById('lightbox');
-  const img = document.getElementById('lightbox-img');
-  img.src = src;
+  document.getElementById('lightbox-img').src = src;
   lb.classList.add('open');
   document.body.style.overflow = 'hidden';
 }
 function closeLightbox() {
-  const lb = document.getElementById('lightbox');
-  lb.classList.remove('open');
+  document.getElementById('lightbox').classList.remove('open');
   document.getElementById('lightbox-img').removeAttribute('src');
   document.body.style.overflow = '';
 }
@@ -399,11 +364,6 @@ function filterItems(items) {
     return true;
   });
 }
-function resolvePreviewSrc(previewRel) {
-  if (!previewRel) return '';
-  if (hasServer) return '/' + previewRel;
-  return previewRel;
-}
 function render() {
   if (!manifest) return;
   const items = filterItems(manifest.items || []);
@@ -417,11 +377,10 @@ function render() {
   items.forEach(it => {
     const div = document.createElement('div');
     div.className = 'card' + (it.status==='applied'?' applied': it.status==='skipped'?' skipped':'');
-    const previewSrc = resolvePreviewSrc(it.preview_rel);
-    const img = previewSrc
-      ? `<div class="preview-wrap"><img class="preview-thumb" src="${esc(previewSrc)}" alt="preview" title="点击放大查看"/></div>`
+    const img = it.preview_rel
+      ? `<div class="preview-wrap"><img class="preview-thumb" src="/${it.preview_rel}" alt="preview" title="点击放大查看"/></div>`
       : '<div style="color:#888;padding:40px 0;text-align:center">无预览</div>';
-    const canApply = hasServer && it.status === 'pending' && it.applicable;
+    const canApply = it.status === 'pending' && it.applicable;
     div.innerHTML = `
       <div>${img}</div>
       <div class="meta">
@@ -433,7 +392,7 @@ function render() {
         ${it.new_line ? '<div>新: <code>'+esc(it.new_line)+'</code></div>' : ''}
         <div style="margin-top:8px">
           <button class="primary" data-apply="${it.id}" ${canApply?'':'disabled'}>确认修正</button>
-          <button data-skip="${it.id}" ${hasServer && it.status==='pending'?'':'disabled'}>跳过</button>
+          <button data-skip="${it.id}" ${it.status==='pending'?'':'disabled'}>跳过</button>
         </div>
       </div>`;
     list.appendChild(div);
@@ -451,14 +410,7 @@ function render() {
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
 async function load() {
   try {
-    if (hasServer) {
-      manifest = await api('/api/manifest');
-    } else if (EMBEDDED && EMBEDDED.items) {
-      manifest = EMBEDDED;
-    } else {
-      document.getElementById('status').textContent = '错误: 无数据。请通过 Trainer 重新运行标注自修正。';
-      return;
-    }
+    manifest = await api('/api/manifest');
   } catch(e) {
     document.getElementById('status').textContent = '加载失败: ' + e.message;
     return;
@@ -466,7 +418,6 @@ async function load() {
   render();
 }
 async function applyOne(id) {
-  if (!hasServer) return;
   setStatus('应用中…');
   try {
     manifest = await api('/api/apply/' + id, {method:'POST'});
@@ -475,12 +426,10 @@ async function applyOne(id) {
   } catch(e) { setStatus('失败: ' + e.message); }
 }
 async function skipOne(id) {
-  if (!hasServer) return;
   manifest = await api('/api/skip/' + id, {method:'POST'});
   render();
 }
 async function applyAllFix() {
-  if (!hasServer) return;
   setStatus('批量应用中…');
   try {
     manifest = await api('/api/apply-batch', {
@@ -498,21 +447,7 @@ document.getElementById('btn-apply-all').onclick = applyAllFix;
 ['f-fix','f-drop','f-review','f-hide-done'].forEach(id => {
   document.getElementById(id).onchange = render;
 });
-
-// Initialize: detect mode then load
-(async function init() {
-  await detectMode();
-  const banner = document.getElementById('mode-banner');
-  if (hasServer) {
-    banner.className = 'mode-banner server';
-    banner.innerHTML = '✅ 服务器模式 — 可交互确认/跳过修正';
-  } else {
-    banner.className = 'mode-banner';
-    banner.innerHTML = '⚠️ 静态浏览模式 — 仅查看，无法交互。如需确认修正，请通过 Trainer 启动交互复核。';
-  }
-  banner.style.display = 'block';
-  await load();
-})();
+load();
 </script></body></html>"""
     Path(html_path).write_text(doc, encoding="utf-8")
     return html_path
