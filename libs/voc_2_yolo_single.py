@@ -45,39 +45,42 @@ def convert(size, box):  # size:(原图w,原图h) , box:(xmin,xmax,ymin,ymax)
     return (x, y, w, h)   # 返回 相对于原图的物体中心点的x坐标比,y坐标比,宽度比,高度比,取值范围[0-1]
 
 # year ='2012', 对应图片的id（文件名）
-def convert_annotation(xmls_path, txts_path, image_id):
-
-    in_file = open(os.path.join(xmls_path,'%s.xml' % (image_id)), encoding='utf-8')
-    tree = ET.parse(in_file)
+def convert_annotation_xml_to_txt(xml_path, txt_path):
+    tree = ET.parse(xml_path)
     root = tree.getroot()
     size = root.find('size')
-    if size != None:
-        w = int(size.find('width').text)
-        h = int(size.find('height').text)
-        out_file = open(os.path.join(txts_path, '%s.txt' % (image_id)), 'w', encoding='utf-8')
+    if size is None:
+        return
+    w = int(size.find('width').text)
+    h = int(size.find('height').text)
+    os.makedirs(os.path.dirname(txt_path) or '.', exist_ok=True)
+    with open(txt_path, 'w', encoding='utf-8') as out_file:
         for obj in root.iter('object'):
-            # difficult = obj.find('difficult').text
-            # cls = obj.find('name').text.strip()
-            cls_id = 0#classes.index(cls)
+            cls_id = 0
             xmlbox = obj.find('bndbox')
             b = (float(xmlbox.find('xmin').text), float(xmlbox.find('xmax').text),
                  float(xmlbox.find('ymin').text), float(xmlbox.find('ymax').text))
-            bb = convert((w, h), b)           
+            bb = convert((w, h), b)
             out_file.write(str(cls_id) + " " + " ".join([str(a) for a in bb]) + '\n')
-# 
+
+
+def convert_annotation(xmls_path, txts_path, image_id):
+    convert_annotation_xml_to_txt(
+        os.path.join(xmls_path, '%s.xml' % image_id),
+        os.path.join(txts_path, '%s.txt' % image_id),
+    )
 
 #%%
 def voc2yolo_one(txts_path, xmls_path):
+    from libs.dataset_paths import flat_output_stem, iter_files_with_ext
 
-    # if classes:
-    if not os.path.exists(txts_path):
-        os.makedirs(txts_path)
-    for xml in os.listdir(xmls_path):
-        if '.xml' in xml:
-            image_id = os.path.splitext(xml)[0]
-            try:
-                convert_annotation(xmls_path, txts_path, image_id)
-            except Exception as e:
-                print(e)
+    os.makedirs(txts_path, exist_ok=True)
+    for rel, xml_path in iter_files_with_ext(xmls_path, '.xml'):
+        stem = flat_output_stem(rel)
+        txt_out = os.path.join(txts_path, stem + '.txt')
+        try:
+            convert_annotation_xml_to_txt(xml_path, txt_out)
+        except Exception as e:
+            print('[voc2yolo_one]', rel, e)
 
     

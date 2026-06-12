@@ -2,6 +2,7 @@
 # -*- coding: utf8 -*-
 import sys
 import os
+from typing import Optional
 from xml.etree import ElementTree
 from xml.etree.ElementTree import Element, SubElement
 from lxml import etree
@@ -10,6 +11,33 @@ from libs.constants import DEFAULT_ENCODING
 
 TXT_EXT = '.txt'
 ENCODE_METHOD = DEFAULT_ENCODING
+
+def split_yolo_difficult_and_score(d) -> tuple:
+    """Map shape ``difficult`` field to ``(voc_difficult, detection_score)``."""
+    if isinstance(d, bool):
+        return d, None
+    if isinstance(d, float):
+        fv = float(d)
+        if fv == 0.0:
+            return False, None
+        if 0.0 < fv <= 1.0:
+            return False, fv
+        return bool(d), None
+    if isinstance(d, int):
+        return bool(d), None
+    return False, None
+
+
+def resolve_yolo_write_score(difficult, score=None) -> Optional[float]:
+    """Score for YOLO txt suffix; never treat VOC ``difficult=0/1`` as confidence."""
+    if score is not None:
+        fv = float(score)
+        return fv if fv > 0.0 else None
+    if isinstance(difficult, float):
+        fv = float(difficult)
+        return fv if fv > 0.0 else None
+    return None
+
 
 class YOLOWriter:
 
@@ -25,47 +53,32 @@ class YOLOWriter:
     def addBndBox(self, xmin, ymin, xmax, ymax, name, difficult, score=None):
         bndbox = {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}
         bndbox['name'] = name
-        bndbox['difficult'] = difficult
-        if score is not None:
-            bndbox['score'] = float(score)
-        elif isinstance(difficult, (int, float)) and not isinstance(difficult, bool):
-            try:
-                d = float(difficult)
-                if 0.0 <= d <= 1.0:
-                    bndbox['score'] = d
-            except (TypeError, ValueError):
-                pass
+        voc_diff, _ = split_yolo_difficult_and_score(difficult)
+        bndbox['difficult'] = voc_diff
+        resolved = resolve_yolo_write_score(difficult, score)
+        if resolved is not None:
+            bndbox['score'] = resolved
         self.boxlist.append(bndbox)
 
     def addPolygon(self, points, name, difficult, score=None):
         polygon = {'points': points}
         polygon['name'] = name
-        polygon['difficult'] = difficult
-        if score is not None:
-            polygon['score'] = float(score)
-        elif isinstance(difficult, (int, float)) and not isinstance(difficult, bool):
-            try:
-                d = float(difficult)
-                if 0.0 <= d <= 1.0:
-                    polygon['score'] = d
-            except (TypeError, ValueError):
-                pass
+        voc_diff, _ = split_yolo_difficult_and_score(difficult)
+        polygon['difficult'] = voc_diff
+        resolved = resolve_yolo_write_score(difficult, score)
+        if resolved is not None:
+            polygon['score'] = resolved
         self.boxlist.append(polygon)
 
     def addKeypoints(self, points, visibility, name, difficult, score=None):
         pose = {'points': points, 'visibility': visibility}
         pose['name'] = name
-        pose['difficult'] = difficult
+        voc_diff, _ = split_yolo_difficult_and_score(difficult)
+        pose['difficult'] = voc_diff
         pose['shape_type'] = 'keypoints'
-        if score is not None:
-            pose['score'] = float(score)
-        elif isinstance(difficult, (int, float)) and not isinstance(difficult, bool):
-            try:
-                d = float(difficult)
-                if 0.0 <= d <= 1.0:
-                    pose['score'] = d
-            except (TypeError, ValueError):
-                pass
+        resolved = resolve_yolo_write_score(difficult, score)
+        if resolved is not None:
+            pose['score'] = resolved
         self.boxlist.append(pose)
 
     @staticmethod
@@ -330,7 +343,10 @@ class YoloReader:
                     vals, score = values[:5], (float(values[5]) if len(values) == 6 else None)
                 classIndex, xcen, ycen, w, h = vals
                 label, xmin, ymin, xmax, ymax = self.yoloLine2Shape(classIndex, xcen, ycen, w, h)
-                diff = score if score is not None else False
+                if score is not None and float(score) > 0.0:
+                    diff = float(score)
+                else:
+                    diff = False
                 self.addShape(label, xmin, ymin, xmax, ymax, diff)
                 continue
 
@@ -353,7 +369,7 @@ class YoloReader:
                 if is_pose_line:
                     label, points, visibility = self.yoloLine2Keypoints(vals_pose)
                     if len(points) >= 1:
-                        diff = score_pose if score_pose is not None else False
+                        diff = float(score_pose) if score_pose is not None and float(score_pose) > 0.0 else False
                         self.addKeypointShape(label, points, visibility, diff)
                     continue
 
@@ -362,5 +378,5 @@ class YoloReader:
             if len(vals_seg) >= 7 and (len(vals_seg) - 1) % 2 == 0:
                 label, points = self.yoloLine2Polygon(vals_seg)
                 if len(points) >= 3:
-                    diff = score_seg if score_seg is not None else False
+                    diff = float(score_seg) if score_seg is not None and float(score_seg) > 0.0 else False
                     self.addPolygonShape(label, points, diff)

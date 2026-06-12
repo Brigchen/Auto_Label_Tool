@@ -8,7 +8,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 import cv2
 from ultralytics import YOLO
 
-from libs.iou import compute_IOU
+from libs.autolabel_dedup import apply_autolabel_dedup, dedup_pose
 from libs.yolo_io import YOLOWriter
 from libs.yolo_weights import resolve_yolo_checkpoint
 
@@ -48,50 +48,6 @@ def _canonical_label(label: str, class_list: List[str]) -> str:
         if str(c).lower() == str(label).lower():
             return c
     return label
-
-
-def dedup_boxes(boxes, scores, labels, iou_thr):
-    if not boxes:
-        return boxes, scores, labels
-    order = sorted(range(len(boxes)), key=lambda i: float(scores[i]), reverse=True)
-    keep = []
-    for idx in order:
-        suppress = False
-        for kept in keep:
-            if str(labels[idx]) != str(labels[kept]):
-                continue
-            if compute_IOU(boxes[idx], boxes[kept]) > float(iou_thr):
-                suppress = True
-                break
-        if not suppress:
-            keep.append(idx)
-    keep = sorted(keep)
-    return [boxes[i] for i in keep], [scores[i] for i in keep], [labels[i] for i in keep]
-
-
-def dedup_pose(boxes, scores, labels, kpts_vis, iou_thr):
-    if not boxes:
-        return boxes, scores, labels, kpts_vis
-    order = sorted(range(len(boxes)), key=lambda i: float(scores[i]), reverse=True)
-    keep = []
-    for idx in order:
-        suppress = False
-        for kept in keep:
-            if str(labels[idx]) != str(labels[kept]):
-                continue
-            if compute_IOU(boxes[idx], boxes[kept]) > float(iou_thr):
-                suppress = True
-                break
-        if not suppress:
-            keep.append(idx)
-    keep = sorted(keep)
-    return (
-        [boxes[i] for i in keep],
-        [scores[i] for i in keep],
-        [labels[i] for i in keep],
-        [kpts_vis[i] for i in keep],
-    )
-
 
 def _task_from_result(result) -> str:
     kp = getattr(result, 'keypoints', None)
@@ -154,6 +110,7 @@ def _write_yolo_for_image(
     dedup_iou: float,
     task_hint: str = 'auto',
     save_scores: bool = True,
+    cross_class_dedup: bool = True,
 ) -> Tuple[int, str]:
     """Write one label file. Returns (object_count, task_used)."""
     img = cv2.imread(image_path)
@@ -177,7 +134,9 @@ def _write_yolo_for_image(
     if task == 'pose':
         xyxy, scores, labels, kpts_vis = _extract_pose_rows(result, names)
         if xyxy:
-            xyxy, scores, labels, kpts_vis = dedup_pose(xyxy, scores, labels, kpts_vis, dedup_iou)
+            xyxy, scores, labels, kpts_vis = dedup_pose(
+                xyxy, scores, labels, kpts_vis, dedup_iou, cross_class=cross_class_dedup,
+            )
             for box, score, label, (pts, vis) in zip(xyxy, scores, labels, kpts_vis):
                 canon = _canonical_label(label, class_list)
                 writer.addKeypoints(pts, vis, canon, difficult=False, score=_opt_score(score))
@@ -209,7 +168,9 @@ def _write_yolo_for_image(
         labels = [_name_at(names, int(x)) for x in dets.cls]
         scores = [float(x) for x in dets.conf]
         boxes = [x.tolist() for x in dets.xyxy]
-        boxes, scores, labels = dedup_boxes(boxes, scores, labels, dedup_iou)
+        boxes, scores, labels = apply_autolabel_dedup(
+            boxes, scores, labels, dedup_iou, cross_class=cross_class_dedup,
+        )
         for box, score, label in zip(boxes, scores, labels):
             canon = _canonical_label(label, class_list)
             writer.addBndBox(int(box[0]), int(box[1]), int(box[2]), int(box[3]), canon, difficult=False, score=_opt_score(score))
@@ -231,6 +192,7 @@ def run_autolabel_batch(
     class_list: Optional[Sequence[str]] = None,
     task_hint: str = 'auto',
     save_scores: bool = True,
+    cross_class_dedup: bool = True,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Tuple[int, int, int]:
@@ -267,7 +229,9 @@ def run_autolabel_batch(
         result = model.predict(source=img_path, conf=conf, iou=pred_iou, verbose=False)[0]
         cnt, _ = _write_yolo_for_image(
             result, names, img_path, label_path, class_list, dedup_iou,
-            task_hint=task_hint, save_scores=save_scores)
+            task_hint=task_hint, save_scores=save_scores,
+            cross_class_dedup=cross_class_dedup,
+        )
         if cnt > 0:
             n_labeled += 1
             n_obj += cnt

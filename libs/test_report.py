@@ -19,12 +19,21 @@ from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 
 from libs.iou import compute_IOU
+from libs.yolo_line_parse import parse_yolo_line_score, normalize_detection_score
 from libs.pkg_paths import resolve_cjk_plot_font
 from libs.yolo_dataset_paths import ensure_classes_txt
 from libs.eval_export import (
+    build_confusion_matrix_from_boxes,
     export_ultralytics_val_results,
     export_custom_eval_results,
     per_class_rows_from_image_stats,
+)
+from libs.test_report_analysis import (
+    build_training_diagnosis,
+    find_confusion_pairs,
+    render_diagnosis_html,
+    save_diagnosis_sidecars,
+    scan_dataset_class_counts,
 )
 
 LogFn = Callable[[str], None]
@@ -458,7 +467,10 @@ def load_gt_boxes(label_path: str, names: Dict[int, str], img_w: int, img_h: int
             if len(parts) < 5:
                 continue
             cls, xyxy = _yolo_line_to_xyxy(parts, img_w, img_h)
-            boxes.append(Box(cls=cls, name=names.get(cls, str(cls)), xyxy=xyxy, conf=1.0))
+            score, _kind = parse_yolo_line_score(line)
+            score = normalize_detection_score(score)
+            conf = float(score) if score is not None else 1.0
+            boxes.append(Box(cls=cls, name=names.get(cls, str(cls)), xyxy=xyxy, conf=conf))
     return boxes
 
 
@@ -606,6 +618,8 @@ def draw_comparison(
         x1, y1, x2, y2 = map(int, gt.xyxy)
         draw.rectangle((x1, y1, x2, y2), outline=(0, 200, 0), width=2)
         lbl = f"GT:{gt.name}"
+        if gt.conf is not None and float(gt.conf) < 1.0:
+            lbl += f" {float(gt.conf):.2f}"
         _, _, _, th = _text_bbox(font, lbl)
         ty = max(0, y1 - th - 4)
         draw.text((x1, ty), lbl, font=font, fill=(0, 200, 0))
@@ -635,6 +649,46 @@ def _imwrite(path: str, img: np.ndarray) -> None:
 def _is_low_score(item: ImageEval) -> bool:
     """True when F1 < 1 (any detection mismatch)."""
     return item.score > 0
+
+
+def _read_image_size(image_path: str) -> Tuple[int, int]:
+    img = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        img = cv2.imread(image_path)
+    if img is None:
+        return 0, 0
+    h, w = img.shape[:2]
+    return w, h
+
+
+def boxes_to_yolo_text(
+    boxes: List[Box],
+    img_w: int,
+    img_h: int,
+    *,
+    save_score: bool = True,
+) -> str:
+    """Serialize detection boxes to YOLO txt (optionally with confidence column)."""
+    if img_w <= 0 or img_h <= 0:
+        return ""
+    lines: List[str] = []
+    for b in boxes:
+        x1, y1, x2, y2 = b.xyxy
+        cx = ((x1 + x2) / 2.0) / img_w
+        cy = ((y1 + y2) / 2.0) / img_h
+        bw = (x2 - x1) / img_w
+        bh = (y2 - y1) / img_h
+        cx = min(max(cx, 0.0), 1.0)
+        cy = min(max(cy, 0.0), 1.0)
+        bw = min(max(bw, 0.0), 1.0)
+        bh = min(max(bh, 0.0), 1.0)
+        line = f"{int(b.cls)} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
+        if save_score and b.conf is not None and float(b.conf) < 1.0:
+            line += f" {float(b.conf):.6f}"
+        lines.append(line)
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
 
 
 def _sample_pairs(
@@ -683,6 +737,7 @@ def _write_html(
     export_dataset_dir: str = "",
     export_split: str = "",
     excel_path: str = "",
+    diagnosis_html: str = "",
 ) -> str:
     index_path = os.path.join(out_dir, "index.html")
     rel = lambda p: html.escape(os.path.relpath(p, out_dir).replace("\\", "/"))
@@ -752,8 +807,11 @@ th {{ background: #eee; }}
 .legend {{ font-size: 13px; color: #555; }}
 .legend span {{ display: inline-block; margin-right: 16px; }}
 .gt {{ color: #0a0; font-weight: bold; }} .pred {{ color: #c00; font-weight: bold; }}
+.findings li {{ line-height: 1.5; }}
+.suggestions li {{ margin-bottom: 8px; line-height: 1.55; }}
 </style></head><body>
 <h1>{html.escape(report_title)}</h1>
+{diagnosis_html}
 <div class="card">{summary}
 <p class="legend"><span class="gt">■ 绿框 = GT 实际</span>
 <span class="pred">■ 红框 = 预测 (P:类名 score)</span></p>
@@ -780,9 +838,15 @@ def export_low_score_dataset(
     names: Dict[int, str],
     *,
     split_folder: str = "test",
+    label_mode: str = "gt",
     log: LogFn = print,
 ) -> Tuple[str, int, int]:
     """Copy low-score originals to images/<split> + labels/<split> for relabeling."""
+    label_mode = (label_mode or "gt").strip().lower()
+    if label_mode not in ("gt", "predict"):
+        label_mode = "gt"
+    use_predict = label_mode == "predict"
+
     root = Path(export_root).resolve()
     img_dir = root / "images" / split_folder
     lbl_dir = root / "labels" / split_folder
@@ -791,30 +855,58 @@ def export_low_score_dataset(
 
     manifest: List[dict] = []
     img_n = lbl_n = 0
+    used_stems: set = set()
     for rank, item in enumerate(worst, start=1):
         src_img = Path(item.image_path)
         if not src_img.is_file():
             continue
-        dst_img = img_dir / src_img.name
-        shutil.copy2(src_img, dst_img)
+        stem = src_img.stem
+        base = stem
+        n = 2
+        while stem.lower() in used_stems:
+            stem = f"{base}_{n}"
+            n += 1
+        used_stems.add(stem.lower())
+        dst_img = img_dir / f"{stem}{src_img.suffix}"
+        try:
+            dst_img.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src_img), str(dst_img))
+        except OSError:
+            continue
         img_n += 1
 
-        dst_lbl = lbl_dir / f"{src_img.stem}.txt"
-        if item.label_path and os.path.isfile(item.label_path):
-            shutil.copy2(item.label_path, dst_lbl)
-            lbl_n += 1
+        dst_lbl = lbl_dir / f"{stem}.txt"
+        if use_predict:
+            img_w, img_h = _read_image_size(str(src_img))
+            body = boxes_to_yolo_text(item.pred_boxes, img_w, img_h, save_score=True)
+            dst_lbl.write_text(body, encoding="utf-8")
+            if body.strip():
+                lbl_n += 1
+        elif item.label_path and os.path.isfile(item.label_path):
+            try:
+                shutil.copy2(item.label_path, dst_lbl)
+                lbl_n += 1
+            except OSError:
+                dst_lbl.write_text("", encoding="utf-8")
         else:
             dst_lbl.write_text("", encoding="utf-8")
 
         manifest.append(
             {
                 "rank": rank,
-                "file": src_img.name,
+                "file": f"{stem}{src_img.suffix}",
                 "f1": round(item.f1, 4),
                 "score": round(item.score, 4),
                 "detail": item.detail,
-                "source_image": str(Path(item.image_path).resolve()),
-                "source_label": str(Path(item.label_path).resolve()) if item.label_path else "",
+                "label_mode": label_mode,
+                "gt_count": item.gt_count,
+                "pred_count": item.pred_count,
+                "source_image": str(src_img.resolve()) if src_img.is_file() else str(src_img),
+                "source_label": (
+                    str(Path(item.label_path).resolve())
+                    if item.label_path and os.path.isfile(item.label_path)
+                    else (item.label_path or "")
+                ),
             }
         )
 
@@ -836,16 +928,17 @@ def export_low_score_dataset(
 
     ensure_classes_txt(str(lbl_dir), names)
 
+    label_desc = "模型预测框 (Predict)" if use_predict else "原标注 (GT)"
     readme = root / "README.txt"
     readme.write_text(
         "低分样本导出包（用于修正标注）\n"
         f"  images/{split_folder}/  原始图像\n"
-        f"  labels/{split_folder}/  YOLO 标注\n"
+        f"  labels/{split_folder}/  YOLO 标注（{label_desc}）\n"
         "  low_score_manifest.json  F1/score 与源路径对照\n"
         "  data.yaml                可用 FishVision/ALT 打开\n",
         encoding="utf-8",
     )
-    _log(f"低分数据集: {root}（图像 {img_n}，标注 {lbl_n}）", log)
+    _log(f"低分数据集: {root}（图像 {img_n}，标注 {lbl_n}，来源 {label_desc}）", log)
     return str(root), img_n, lbl_n
 
 
@@ -866,6 +959,7 @@ def run_test_report(
     predict_batch: int = 32,
     export_dataset: bool = False,
     export_dataset_dir: Optional[str] = None,
+    export_label_mode: str = "gt",
     log: LogFn = print,
     progress: Optional[ProgressFn] = None,
 ) -> Tuple[str, str]:
@@ -901,15 +995,18 @@ def run_test_report(
     if can_ultra_val:
         try:
             _log("Ultralytics 整集验证…", log)
-            val_metrics = model.val(
-                data=yaml_for_val,
-                split=split_used if split_used in ("train", "val", "test") else "val",
-                conf=conf,
-                iou=iou_match,
-                device=device,
-                verbose=False,
-                plots=False,
-            )
+            from libs.yolo_label_clean import ultralytics_six_column_label_compat
+
+            with ultralytics_six_column_label_compat(log=_log):
+                val_metrics = model.val(
+                    data=yaml_for_val,
+                    split=split_used if split_used in ("train", "val", "test") else "val",
+                    conf=conf,
+                    iou=iou_match,
+                    device=device,
+                    verbose=False,
+                    plots=False,
+                )
             if hasattr(val_metrics, "results_dict"):
                 rd = val_metrics.results_dict
                 for k in ("metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)"):
@@ -978,11 +1075,51 @@ def run_test_report(
     if export_dataset and low_score:
         ds_root = export_dataset_dir or os.path.join(out_dir, "low_score_dataset")
         exported_dataset_dir, _, _ = export_low_score_dataset(
-            low_score, ds_root, names, split_folder=export_split, log=log
+            low_score,
+            ds_root,
+            names,
+            split_folder=export_split,
+            label_mode=export_label_mode,
+            log=log,
         )
 
     class_stats = _class_stats(results)
     image_class_rows = per_class_rows_from_image_stats(class_stats)
+
+    cm_matrix = None
+    cm_labels: List[str] = []
+    per_class_rows: List[dict] = []
+    try:
+        cm_matrix, cm_labels, per_class_rows = build_confusion_matrix_from_boxes(
+            pairs, pred_map, names, iou_match, load_gt_boxes=load_gt_boxes,
+        )
+    except Exception as exc:
+        _log(f"混淆矩阵/类群统计跳过: {exc}", log)
+
+    confusion_pairs = find_confusion_pairs(cm_matrix, cm_labels) if cm_matrix is not None else []
+    dataset_counts = scan_dataset_class_counts(
+        report_yaml, names, load_data_yaml=load_data_yaml, resolve_split_dir=_resolve_split_dir,
+    ) if report_yaml and os.path.isfile(str(report_yaml)) else {}
+
+    diagnosis = build_training_diagnosis(
+        names=names,
+        per_class_rows=per_class_rows,
+        class_stats=class_stats,
+        results=results,
+        split_used=split_used,
+        overall=overall,
+        dataset_counts=dataset_counts,
+        confusion_pairs=confusion_pairs,
+        eval_image_count=len(results),
+        low_score_count=len(low_score),
+    )
+    try:
+        save_diagnosis_sidecars(out_dir, diagnosis)
+        _log("训练诊断: training_diagnosis.json / .md", log)
+    except Exception as exc:
+        _log(f"训练诊断导出失败: {exc}", log)
+    diagnosis_html = render_diagnosis_html(diagnosis)
+
     excel_path = ""
     try:
         export_extra = {
@@ -1033,6 +1170,7 @@ def run_test_report(
         export_dataset_dir=exported_dataset_dir,
         export_split=export_split,
         excel_path=excel_path,
+        diagnosis_html=diagnosis_html,
     )
     _log(f"报告已生成: {html_path}", log)
     _log(f"低分样本: {len(low_score)} 张（报告可视化前 {len(preview)} 张）", log)

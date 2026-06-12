@@ -112,6 +112,7 @@ def annotate_videos_to_yolo(
     class_list: Optional[Sequence[str]] = None,
     task_hint: str = 'auto',
     save_scores: bool = True,
+    cross_class_dedup: bool = True,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Tuple[int, int, int]:
@@ -180,7 +181,9 @@ def annotate_videos_to_yolo(
             label_path = os.path.join(labels_dir, os.path.splitext(img_name)[0] + '.txt')
             cnt, _ = _write_yolo_for_image(
                 result, names, img_path, label_path, class_list, dedup_iou,
-                task_hint=task_hint, save_scores=save_scores)
+                task_hint=task_hint, save_scores=save_scores,
+                cross_class_dedup=cross_class_dedup,
+            )
             if cnt > 0:
                 frames_labeled += 1
                 total_objects += cnt

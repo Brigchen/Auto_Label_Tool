@@ -30,6 +30,7 @@ from libs.train_monitor import (
     resolve_run_base,
 )
 from libs.eval_export import export_post_train_val_metrics
+from libs.yolo_label_clean import ultralytics_six_column_label_compat
 from libs.yolo_weights import resolve_yolo_checkpoint
 
 LogFn = Callable[[str], None]
@@ -39,6 +40,8 @@ _AUG_KEYS = (
     "shear", "perspective", "flipud", "fliplr", "mosaic", "mixup",
     "copy_paste", "erasing", "auto_augment",
 )
+
+_UW_TRAIN_KEYS = ("uw_augment", "uw_augment_p", "uw_augment_strength", "uw_include_enhance")
 
 PYTORCH_CU128_UPGRADE_CMD = (
     "pip install -U --pre torch torchvision torchaudio "
@@ -577,6 +580,9 @@ def normalize_train_kwargs(raw: dict, model=None) -> dict:
         if k in kw and kw[k] == "":
             kw.pop(k)
 
+    for k in _UW_TRAIN_KEYS:
+        kw.pop(k, None)
+
     schedule = str(kw.pop("lr_schedule", "") or "").lower()
     kw.pop("lr_cos_tmax", None)
     if schedule:
@@ -759,6 +765,25 @@ def run_training(
             log,
         )
 
+        uw_enabled = bool(params.get("uw_augment", False))
+        uw_p = float(params.get("uw_augment_p", 0.5))
+        uw_strength = str(params.get("uw_augment_strength", "medium") or "medium")
+        uw_include_enhance = bool(params.get("uw_include_enhance", True))
+        if uw_enabled:
+            _log_ts(
+                f"水下在线增强: p={uw_p:.2f} strength={uw_strength} "
+                f"include_enhance={uw_include_enhance}",
+                log,
+            )
+
+        from libs.uw_train_hook import configure_underwater_train, restore_underwater_train
+        configure_underwater_train(
+            uw_enabled,
+            p=uw_p,
+            strength=uw_strength,
+            include_enhance=uw_include_enhance,
+        )
+
         training_started = threading.Event()
         stop_hb = threading.Event()
 
@@ -788,28 +813,30 @@ def run_training(
             log=log,
         )
         try:
-            _log_ts(">>> 调用 model.train() >>>", log)
-            model.train(**kw)
-            try:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-            except Exception:
-                pass
-            _log_ts("model.train() 正常返回", log)
-            export_best_weight(params, model=model, log=log)
-            run_dir = find_latest_run_dir(
-                params.get("task", "detect"),
-                params.get("project", ""),
-                params.get("name", "train"),
-            )
-            if run_dir:
+            with ultralytics_six_column_label_compat(log=_log_ts):
+                _log_ts(">>> 调用 model.train() >>>", log)
+                model.train(**kw)
                 try:
-                    export_post_train_val_metrics(
-                        model, params, run_dir, split="val", log=log,
-                    )
-                except Exception as exc:
-                    _log_ts(f"类群评估 Excel 导出: {exc}", log)
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                _log_ts("model.train() 正常返回", log)
+                export_best_weight(params, model=model, log=log)
+                run_dir = find_latest_run_dir(
+                    params.get("task", "detect"),
+                    params.get("project", ""),
+                    params.get("name", "train"),
+                )
+                if run_dir:
+                    try:
+                        export_post_train_val_metrics(
+                            model, params, run_dir, split="val", log=log,
+                        )
+                    except Exception as exc:
+                        _log_ts(f"类群评估 Excel 导出: {exc}", log)
         finally:
+            restore_underwater_train()
             sys.stdout = prev_out
             sys.stderr = prev_err
             restore_logging_streams(prev_out)

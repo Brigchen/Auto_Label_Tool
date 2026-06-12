@@ -9,6 +9,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from libs.yolo_label_clean import ultralytics_six_column_label_compat
+
 LogFn = Callable[[str], None]
 
 
@@ -337,13 +339,14 @@ def export_post_train_val_metrics(
         return None
     device = params.get("device", "0")
     try:
-        metrics = model.val(
-            data=str(data),
-            split=split,
-            device=device,
-            verbose=False,
-            plots=False,
-        )
+        with ultralytics_six_column_label_compat():
+            metrics = model.val(
+                data=str(data),
+                split=split,
+                device=device,
+                verbose=False,
+                plots=False,
+            )
     except Exception as exc:
         _log(f"训练后 val 导出跳过: {exc}", log)
         return None

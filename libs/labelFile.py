@@ -8,7 +8,7 @@ except ImportError:
 
 from base64 import b64encode, b64decode
 from libs.pascal_voc_io import PascalVocWriter
-from libs.yolo_io import YOLOWriter
+from libs.yolo_io import YOLOWriter, split_yolo_difficult_and_score
 from libs.pascal_voc_io import XML_EXT
 import os.path
 import sys
@@ -88,16 +88,21 @@ class LabelFile(object):
         for shape in shapes:
             points = shape['points']
             label = shape['label']
-            # Add Chris
-            difficult = int(shape['difficult'])
             shape_type = shape.get('shape_type', 'bbox')
+            voc_difficult, det_score = split_yolo_difficult_and_score(shape['difficult'])
             if shape_type == 'keypoints':
-                writer.addKeypoints(points, shape.get('keypoint_visibility', []), label, difficult)
+                writer.addKeypoints(
+                    points, shape.get('keypoint_visibility', []), label, voc_difficult,
+                    score=det_score,
+                )
             elif saveSegmentation:
-                writer.addPolygon(points, label, difficult)
+                writer.addPolygon(points, label, voc_difficult, score=det_score)
             else:
                 bndbox = LabelFile.convertPoints2BndBox(points)
-                writer.addBndBox(bndbox[0], bndbox[1], bndbox[2], bndbox[3], label, difficult)
+                writer.addBndBox(
+                    bndbox[0], bndbox[1], bndbox[2], bndbox[3], label, voc_difficult,
+                    score=det_score,
+                )
 
         writer.save(targetFile=filename, classList=classList)
         return

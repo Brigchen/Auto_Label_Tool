@@ -78,6 +78,58 @@ def find_latest_run_dir(task: str, project: str, name: str, repo: str = "") -> s
     return max(dirs, key=lambda p: os.path.getmtime(p))
 
 
+def normalize_tb_logdir(path: str) -> str:
+    """Forward-slash absolute path (TensorBoard on Windows is picky about backslashes)."""
+    if not path:
+        return ""
+    return str(Path(path).expanduser().resolve()).replace("\\", "/")
+
+
+def has_tensorboard_events(logdir: str) -> bool:
+    """True if directory tree contains TensorBoard event files."""
+    root = Path(logdir)
+    if not root.is_dir():
+        return False
+    for pattern in ("events.out.tfevents.*", "*.tfevents.*"):
+        if any(root.rglob(pattern)):
+            return True
+    return False
+
+
+def pick_tensorboard_logdir(
+    task: str = "detect",
+    project: str = "",
+    name: str = "train",
+    repo: str = "",
+) -> Tuple[str, str]:
+    """Choose logdir with event files; return (path, user hint)."""
+    cur_run = find_latest_run_dir(task, project, name, repo)
+    run_base = resolve_run_base(task, project, repo)
+    runs_root = os.path.join(repo or _repo_root_fallback(), "runs")
+
+    if has_tensorboard_events(cur_run):
+        return normalize_tb_logdir(cur_run), f"当前 run: {os.path.basename(cur_run)}"
+
+    if has_tensorboard_events(run_base):
+        return normalize_tb_logdir(run_base), f"任务目录: {run_base}"
+
+    if has_tensorboard_events(runs_root):
+        return normalize_tb_logdir(runs_root), f"runs 根目录: {runs_root}"
+
+    # Prefer current run even before first epoch writes events (results.csv may exist).
+    if os.path.isdir(cur_run):
+        return normalize_tb_logdir(cur_run), (
+            f"当前 run（尚无 TensorBoard 事件文件）: {os.path.basename(cur_run)}"
+        )
+    return normalize_tb_logdir(run_base), f"任务目录: {run_base}"
+
+
+def _repo_root_fallback() -> str:
+    from libs.repo_paths import repo_root
+
+    return repo_root()
+
+
 def find_latest_last_pt(task: str, project: str, name: str, repo: str = "") -> Optional[str]:
     """Newest last.pt among runs sharing the same base name."""
     best: Optional[str] = None
@@ -144,30 +196,35 @@ class TensorBoardServer:
         return self._process is not None and self._process.poll() is None
 
     def start(self, logdir: str = "", port: Optional[int] = None,
-              callback=None, logdir_spec: str = "") -> str:
+              callback=None, logdir_spec: str = "", *, force_restart: bool = False) -> str:
         """启动 TensorBoard（非阻塞）。
 
         支持 --logdir 或 --logdir_spec 两种模式。
-        logdir_spec 格式: "name1:path1,name2:path2"
+        logdir_spec 格式: "name1:path1,name2:path2"（Windows 下不推荐，盘符冒号会干扰解析）
 
         若提供 callback(msg: str)，实际启动完成后会异步调用它。
         """
         if port is not None:
             self.port = port
         if logdir:
-            self.logdir = os.path.abspath(logdir)
-        self._logdir_spec = logdir_spec
+            self.logdir = normalize_tb_logdir(logdir)
+        self._logdir_spec = logdir_spec.strip()
 
-        dir_ok = (logdir_spec.strip() != "" or
-                  (self.logdir and os.path.isdir(self.logdir)))
+        dir_ok = (
+            self._logdir_spec != ""
+            or (self.logdir and os.path.isdir(self.logdir.replace("/", os.sep)))
+        )
         if not dir_ok:
             return f"日志目录不存在: {self.logdir}"
 
         if self.is_running:
-            msg = f"TensorBoard 已在运行: http://localhost:{self.port}"
-            if callback:
-                callback(msg)
-            return msg
+            if force_restart:
+                self.stop()
+            else:
+                msg = f"TensorBoard 已在运行: http://localhost:{self.port}"
+                if callback:
+                    callback(msg)
+                return msg
 
         tb = _find_tensorboard()
         if tb is None:
@@ -180,10 +237,11 @@ class TensorBoardServer:
         def _launch():
             try:
                 args = tb.split() + ["--port", str(self.port), "--bind_all"]
-                if self._logdir_spec:
+                # Windows: --logdir_spec 与 C:\ 盘符冲突，统一用 --logdir
+                if self._logdir_spec and os.name != "nt":
                     args += ["--logdir_spec", self._logdir_spec]
                 else:
-                    args += ["--logdir", self.logdir]
+                    args += ["--logdir", self.logdir or normalize_tb_logdir(self._logdir_spec)]
                 self._process = subprocess.Popen(
                     args,
                     stdout=subprocess.DEVNULL,
@@ -193,9 +251,9 @@ class TensorBoardServer:
                 url = f"http://localhost:{self.port}"
                 if self.is_running:
                     webbrowser.open(url)
-                    msg = f"TensorBoard 已启动: {url}"
+                    msg = f"TensorBoard 已启动: {url}  (logdir={self.logdir})"
                 else:
-                    msg = "TensorBoard 启动失败，请检查安装"
+                    msg = "TensorBoard 启动失败，请检查安装 (pip install tensorboard)"
             except Exception as e:
                 msg = f"TensorBoard 启动异常: {e}"
             if callback:

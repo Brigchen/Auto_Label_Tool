@@ -21,6 +21,7 @@ SETTING_DRAW_SQUARE = 'draw/square'
 SETTING_DRAW_MODE = 'draw/mode'
 SETTING_YOLO_SAVE_SEG = 'yolo/save_segmentation'
 SETTING_AUTOLABEL_DUP_IOU = 'autolabel/dedup_iou'
+SETTING_AUTOLABEL_CROSS_CLASS_DEDUP = 'autolabel/cross_class_dedup'
 SETTING_AUTOLABEL_WEIGHTS = 'autolabel/weights'
 SETTING_AUTOLABEL_CONF = 'autolabel/conf'
 SETTING_AUTOLABEL_PRED_IOU = 'autolabel/pred_iou'
@@ -37,12 +38,32 @@ SETTING_UPDATE_MANIFEST_URL = 'update/manifest_url'
 SETTING_LAST_UPDATE_CHECK = 'update/last_check'
 SETTING_KEYPOINT_TEMPLATE = 'keypoints/template'
 SETTING_KEYPOINT_SCHEMA_FILE = 'keypoints/schema_file'
+SETTING_MAKE_DATASETS_IMAGE = 'make_datasets/image_dir'
+SETTING_MAKE_DATASETS_LABEL = 'make_datasets/label_dir'
+SETTING_MAKE_DATASETS_OUTPUT = 'make_datasets/output_dir'
+SETTING_MAKE_DATASETS_VOC = 'make_datasets/voc'
+SETTING_MAKE_DATASETS_SINGLE_CLASS = 'make_datasets/single_class'
+SETTING_MAKE_DATASETS_SINGLE_NAME = 'make_datasets/single_class_name'
+SETTING_MAKE_DATASETS_CLASSES_FILE = 'make_datasets/classes_file'
+SETTING_MAKE_DATASETS_SPLIT = 'make_datasets/split'
+SETTING_MAKE_DATASETS_CREATE_TEST = 'make_datasets/create_test'
+SETTING_MAKE_DATASETS_TEST_SPLIT = 'make_datasets/test_split'
+SETTING_MAKE_DATASETS_UW_OFFLINE = 'make_datasets/uw_offline'
+SETTING_MAKE_DATASETS_UW_COPIES = 'make_datasets/uw_copies'
+SETTING_MAKE_DATASETS_UW_STRENGTH = 'make_datasets/uw_strength'
+SETTING_UW_OFFLINE_DATASET = 'uw_offline/dataset_root'
+SETTING_UW_OFFLINE_COPIES = 'uw_offline/copies'
+SETTING_UW_OFFLINE_STRENGTH = 'uw_offline/strength'
+SETTING_UW_OFFLINE_SPLIT_TRAIN = 'uw_offline/split_train'
+SETTING_UW_OFFLINE_SPLIT_VAL = 'uw_offline/split_val'
+SETTING_UW_OFFLINE_SPLIT_TEST = 'uw_offline/split_test'
 DEFAULT_ENCODING = 'utf-8'
-APP_VERSION = '3.4.0'
-APP_UPDATE_DATE = '2026-5-30'
+APP_VERSION = '3.5.0'
+APP_UPDATE_DATE = '2026-6-12'
 APP_CHANGELOG = [
-    'FishVision Trainer: test report (HTML, train/val/test, random sample, export all low-score by split)',
-    'ALT ↔ Trainer: launch Train Console from ALT; launch ALT after report or from toolbar',
-    'ALT CLI: --datasets / --split auto-open YOLO images & labels; default mouse-wheel zoom',
-    'Training/logging: stream close fix on exit; env_bootstrap suppresses pynvml warning',
+    'Label Self-Refine: GT vs pred comparison, conservative auto-fix, dry-run, interactive review',
+    'Training Diagnosis: data gaps, weak classes, confusion pairs, actionable suggestions',
+    'Underwater Augment: offline batch + online training hook (attenuation, haze, turbidity, etc.)',
+    'Cross-class dedup: remove overlapping boxes across different classes during auto-label',
+    'Test report: export Predict labels (with conf) for low-score samples; Make Datasets test split',
 ]

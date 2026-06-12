@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented here.
 
+## [3.5.0] – 2026-06-12
+
+### Added
+
+- **Label Self-Refine** (`libs/label_self_refine*.py`): compare GT vs predictions, apply conservative fixes (wrong class, low-score drops, missing boxes); dry-run mode; interactive review web server; CSV/HTML report.
+- **Training Diagnosis** (`libs/test_report_analysis.py`): HTML report with data gaps, weak classes, confusion pairs, actionable suggestions; per-class instance counts across train/val/test.
+- **Underwater Augment** (`libs/underwater_augment.py`, `libs/uw_train_hook.py`): offline batch augment + online training hook (attenuation, haze, turbidity, color cast, vignette, spotlight, clahe, gamma).
+- **Cross-class dedup** (`libs/autolabel_dedup.py`): remove overlapping boxes across different classes during auto-label (video batch and single-image).
+- **Test report export Predict labels**: option to export prediction boxes (with conf) instead of GT for low-score samples; useful for correcting model errors.
+- **Make Datasets upgrade**: support creating test split; settings persistence (`SETTING_MAKE_DATASETS_*`); underwater offline augment integration (`uw_offline_copies`, `uw_offline_strength`).
+- **TensorBoard improvements**: auto-select directory with event files (`pick_tensorboard_logdir`); Windows path normalization; force restart option.
+- **YOLO line parse** (`libs/yolo_line_parse.py`): parse YOLO txt lines with optional confidence column.
+- **Dataset paths** (`libs/dataset_paths.py`): recursive file iteration utilities for large datasets.
+- **YOLO label clean** (`libs/yolo_label_clean.py`): six-column YOLO label compatibility wrapper for Ultralytics val/train.
+
+### Changed
+
+- **YOLO IO**: `addBndBox/addKeypoints` now accept explicit `difficult` and `score` parameters; score field properly serialized.
+- **Dataset YAML**: supports `test: images/test` field when test split exists.
+- **classes.txt**: written to `labels/test/` directory when test split is created.
+- **Train augment panel**: added underwater augment controls (`uw_augment`, `uw_augment_p`, `uw_augment_strength`, `uw_include_enhance`).
+- **Test report dialog**: added label source dropdown (GT / Predict with conf).
+- **ALT Make Datasets dialog**: persistent settings; test split checkbox; underwater offline augment options.
+
+### Fixed
+
+- Six-column YOLO label compatibility during Ultralytics val/train (columns: class x y w h conf).
+- Windows TensorBoard `--logdir_spec` path parsing issues (backslash conflicts).
+- Auto-label score field handling for keypoints and bounding boxes.
+
+---
+
 ## [3.4.0] – 2026-05-30
 
 ### Added

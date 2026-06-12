@@ -293,6 +293,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.settings[SETTING_AUTOLABEL_CONF] = float(getattr(self, 'autoLabelConf', 0.25))
             self.settings[SETTING_AUTOLABEL_PRED_IOU] = float(getattr(self, 'autoLabelPredIou', 0.5))
             self.settings[SETTING_AUTOLABEL_DUP_IOU] = float(getattr(self, 'autoLabelDedupIou', 0.7))
+            self.settings[SETTING_AUTOLABEL_CROSS_CLASS_DEDUP] = bool(
+                getattr(self, 'autoLabelCrossClassDedup', True))
             self.settings[SETTING_AUTOLABEL_SETUP_DONE] = bool(getattr(self, 'autoLabelSetupDone', False))
             self.settings[SETTING_AUTOLABEL_WEIGHTS_CONFIRMED] = bool(
                 getattr(self, 'autolabelWeightsUserConfirmed', False))
@@ -559,6 +561,20 @@ class MainWindow(QMainWindow, WindowMixin):
             'app',
             'Build train/val YOLO dataset from labeled images.',
             enabled=True)
+        underwater_offline_augment = action(
+            'Underwater Offline Augment',
+            self.underwater_offline_augment,
+            'Ctrl+5',
+            'app',
+            'Add underwater photometric variants to an existing YOLO dataset (train split recommended).',
+            enabled=True)
+        label_self_refine = action(
+            'Label Self-Refine',
+            self.label_self_refine,
+            'Ctrl+7',
+            'app',
+            'Compare GT with model predictions; conservative auto-fix labels (dry-run by default).',
+            enabled=True)
         training_model = action('Train Model', self.training_model, 'Ctrl+9', 'app')
         open_train_console = action(
             'Train Console',
@@ -807,7 +823,7 @@ class MainWindow(QMainWindow, WindowMixin):
             load_label_names, None,
             label_pruning, file_pruning, change_label, None,
             choose_autolabel_model, auto_label_batch, None,
-            make_datasets, training_model, open_train_console, None,
+            make_datasets, underwater_offline_augment, label_self_refine, training_model, open_train_console, None,
             folder_info, label_info))
         addActions(self.menus.video, (extract_videos, extract_stream, None, annotate_videos))
         addActions(self.menus.file,
@@ -905,6 +921,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.autoLabelPredIou = float(settings.get(SETTING_AUTOLABEL_PRED_IOU, 0.5))
         except Exception:
             self.autoLabelPredIou = 0.5
+        self.autoLabelCrossClassDedup = _as_bool(
+            settings.get(SETTING_AUTOLABEL_CROSS_CLASS_DEDUP, True))
         self.autoLabelSetupDone = _as_bool(settings.get(SETTING_AUTOLABEL_SETUP_DONE, False))
         sw = ustr(settings.get(SETTING_AUTOLABEL_WEIGHTS, '')).strip()
         if sw:
@@ -1508,7 +1526,6 @@ class MainWindow(QMainWindow, WindowMixin):
             QMessageBox.information(self, u'Error', u'下载更新包失败: %s' % str(e))
 
     def copyLastLabel(self):
-        assert self.beginner()
         print('Copy Last Labels to current image')
         try:
             self._push_undo_checkpoint()
@@ -1552,46 +1569,19 @@ class MainWindow(QMainWindow, WindowMixin):
         self.defaultLabelCombobox.addItems(self.predefined_classes)
 
     def _dedup_same_class_overlaps(self, boxes, scores, labels, iou_thr):
-        """Drop lower-score boxes when same-label IoU is above threshold."""
-        if len(boxes) <= 1:
-            return boxes, scores, labels
-        order = sorted(range(len(boxes)), key=lambda i: float(scores[i]), reverse=True)
-        keep = []
-        for idx in order:
-            suppress = False
-            for kept_idx in keep:
-                if str(labels[idx]) != str(labels[kept_idx]):
-                    continue
-                if compute_IOU(boxes[idx], boxes[kept_idx]) > float(iou_thr):
-                    suppress = True
-                    break
-            if not suppress:
-                keep.append(idx)
-        keep = sorted(keep)
-        return [boxes[i] for i in keep], [scores[i] for i in keep], [labels[i] for i in keep]
+        """Drop lower-score boxes; optional cross-class dedup via autoLabelCrossClassDedup."""
+        from libs.autolabel_dedup import apply_autolabel_dedup
+        return apply_autolabel_dedup(
+            boxes, scores, labels, iou_thr,
+            cross_class=bool(getattr(self, 'autoLabelCrossClassDedup', True)),
+        )
 
     def _dedup_pose_same_class(self, boxes, scores, labels, kpts_vis_list, iou_thr):
         """Same as box dedup but keeps paired keypoint rows."""
-        if len(boxes) <= 1:
-            return boxes, scores, labels, kpts_vis_list
-        order = sorted(range(len(boxes)), key=lambda i: float(scores[i]), reverse=True)
-        keep = []
-        for idx in order:
-            suppress = False
-            for kept_idx in keep:
-                if str(labels[idx]) != str(labels[kept_idx]):
-                    continue
-                if compute_IOU(boxes[idx], boxes[kept_idx]) > float(iou_thr):
-                    suppress = True
-                    break
-            if not suppress:
-                keep.append(idx)
-        keep = sorted(keep)
-        return (
-            [boxes[i] for i in keep],
-            [scores[i] for i in keep],
-            [labels[i] for i in keep],
-            [kpts_vis_list[i] for i in keep],
+        from libs.autolabel_dedup import dedup_pose
+        return dedup_pose(
+            boxes, scores, labels, kpts_vis_list, iou_thr,
+            cross_class=bool(getattr(self, 'autoLabelCrossClassDedup', True)),
         )
 
     def _extract_pose_rows_from_result(self, result, names):
@@ -1783,6 +1773,7 @@ class MainWindow(QMainWindow, WindowMixin):
             'conf': float(self.autoLabelConf),
             'pred_iou': float(self.autoLabelPredIou),
             'dedup_iou': float(self.autoLabelDedupIou),
+            'cross_class_dedup': bool(getattr(self, 'autoLabelCrossClassDedup', True)),
         }
         dlg = ChooseAutoLabelModelDialog(
             self,
@@ -1819,6 +1810,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.autoLabelConf = float(v['conf'])
         self.autoLabelPredIou = float(v['pred_iou'])
         self.autoLabelDedupIou = float(v['dedup_iou'])
+        self.autoLabelCrossClassDedup = bool(v.get('cross_class_dedup', True))
         self.autoLabelSetupDone = True
         self.autolabelWeightsUserConfirmed = True
         self.settings[SETTING_AUTOLABEL_WEIGHTS_CONFIRMED] = True
@@ -1852,6 +1844,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 'conf': float(self.autoLabelConf),
                 'pred_iou': float(self.autoLabelPredIou),
                 'dedup_iou': float(self.autoLabelDedupIou),
+                'cross_class_dedup': bool(getattr(self, 'autoLabelCrossClassDedup', True)),
             }
             dlg = AutoLabelBatchDialog(self, defaults)
             if dlg.exec_() != QDialog.Accepted:
@@ -1892,6 +1885,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 progress_cb=progress_cb,
                 cancel_cb=progress.wasCanceled,
                 save_scores=bool(v.get('save_score', True)),
+                cross_class_dedup=bool(v.get('cross_class_dedup', True)),
             )
             progress.setValue(100)
             self.autolabel_weights = v['weights']
@@ -1909,13 +1903,338 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception:
             self._report_error('auto_label_batch')
 
+    def _label_self_refine_defaults(self):
+        """Defaults for Label Self-Refine from autolabel weights and guessed data.yaml."""
+        import time as _time
+        data_yaml = self._guess_data_yaml_for_train() or ''
+        out_dir = ''
+        if data_yaml:
+            stamp = _time.strftime('%Y%m%d_%H%M%S')
+            out_dir = os.path.join(
+                os.path.dirname(os.path.abspath(data_yaml)),
+                f'label_self_refine_{stamp}',
+            )
+        return {
+            'weights': ustr(getattr(self, 'autolabel_weights', '') or ''),
+            'data_yaml': data_yaml,
+            'out_dir': out_dir,
+            'split_train': True,
+            'split_val': True,
+            'split_test': False,
+            'dry_run': True,
+        }
+
+    def label_self_refine(self):
+        """Annotate-Tools → Label Self-Refine: GT vs predict conservative label fixes."""
+        from libs.annotate_dialogs import LabelSelfRefineDialog
+        from libs.label_self_refine_worker import LabelSelfRefineWorker
+        try:
+            dlg = LabelSelfRefineDialog(self, self._label_self_refine_defaults())
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            v = dlg.values()
+            if not v.get('review_only') and not v.get('html_only'):
+                if not v['weights'] or not os.path.isfile(v['weights']):
+                    QMessageBox.warning(self, 'Label Self-Refine', 'Model weights are invalid.')
+                    return
+            if not v['data_yaml'] or not os.path.isfile(v['data_yaml']):
+                QMessageBox.warning(self, 'Label Self-Refine', 'data.yaml is invalid.')
+                return
+            if not v['out_dir']:
+                QMessageBox.warning(self, 'Label Self-Refine', 'Report output folder is required.')
+                return
+
+            worker = getattr(self, '_refine_worker', None)
+            if worker is not None and worker.isRunning():
+                QMessageBox.information(self, 'Label Self-Refine', 'A refine job is already running.')
+                return
+
+            device = '0' if torch.cuda.is_available() else 'cpu'
+            opts = dict(v)
+            opts['device'] = device
+
+            progress = QProgressDialog('Label self-refine…', None, 0, 100, self)
+            progress.setWindowTitle('Label Self-Refine')
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setAutoClose(False)
+            progress.setAutoReset(False)
+            progress.setCancelButton(None)
+            progress.show()
+
+            self._refine_worker = LabelSelfRefineWorker(opts, self)
+
+            def _on_log(msg):
+                print('[ALT][refine]', msg)
+
+            def _on_prog(cur, total, name):
+                if total > 0:
+                    progress.setValue(min(100, int(100 * cur / max(total, 1))))
+                progress.setLabelText(name or 'Processing…')
+
+            def _on_done(status, report_dir, opts_echo):
+                progress.close()
+                if status != 'finished' or not report_dir:
+                    self._report_error('label_self_refine')
+                    return
+                self._label_self_refine_finished(opts_echo, report_dir)
+
+            loop = QEventLoop(self)
+            self._refine_worker.log_signal.connect(_on_log, Qt.QueuedConnection)
+            self._refine_worker.progress_signal.connect(_on_prog, Qt.QueuedConnection)
+
+            def _quit_loop(*_args):
+                loop.quit()
+
+            self._refine_worker.finished_signal.connect(_on_done, Qt.QueuedConnection)
+            self._refine_worker.finished_signal.connect(_quit_loop, Qt.QueuedConnection)
+            self._refine_worker.start()
+            loop.exec_()
+        except Exception:
+            self._report_error('label_self_refine')
+
+    def _label_self_refine_finished(self, v, out_dir):
+        """UI callbacks after background label self-refine completes."""
+        if v.get('html_only'):
+            html_path = os.path.join(out_dir, 'index.html')
+            msg = f'HTML report:\n{html_path}'
+            if v.get('open_interactive_review'):
+                from libs.label_self_refine_review import RefineReviewServer
+                url = RefineReviewServer(out_dir).start(open_browser=True)
+                msg += f'\n\nInteractive review:\n{url}'
+            else:
+                reply = QMessageBox.question(
+                    self, 'Label Self-Refine',
+                    msg + '\n\nOpen interactive review in browser?',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply == QMessageBox.Yes:
+                    from libs.label_self_refine_review import RefineReviewServer
+                    RefineReviewServer(out_dir).start(open_browser=True)
+            return
+
+        if v.get('review_only'):
+            review_dir = os.path.join(out_dir, 'review_queue')
+            n_review = 0
+            manifest = os.path.join(review_dir, 'review_manifest.json')
+            if os.path.isfile(manifest):
+                try:
+                    with open(manifest, encoding='utf-8') as f:
+                        n_review = len(json.load(f))
+                except Exception:
+                    pass
+            msg = (
+                'Review-only export finished.\n\n'
+                'Images exported: %d\n\nOutput:\n%s'
+            ) % (n_review, os.path.abspath(review_dir))
+            if os.path.isdir(review_dir):
+                reply = QMessageBox.question(
+                    self, 'Label Self-Refine',
+                    msg + '\n\nOpen review_queue in ALT?',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply == QMessageBox.Yes:
+                    from libs.alt_launcher import launch_alt
+                    launch_alt(review_dir, split='auto')
+            else:
+                QMessageBox.information(self, 'Label Self-Refine', msg)
+            return
+
+        self.autolabel_weights = v['weights']
+        self.autolabelWeightsUserConfirmed = True
+        self._persist_autolabel_settings()
+
+        summary = {}
+        summary_path = os.path.join(out_dir, 'label_self_refine_summary.json')
+        if os.path.isfile(summary_path):
+            try:
+                with open(summary_path, encoding='utf-8') as f:
+                    summary = json.load(f)
+            except Exception:
+                pass
+
+        mode = 'dry-run' if v.get('dry_run') else 'applied'
+        msg = (
+            'Label self-refine (%s) finished.\n\n'
+            'Images: %d\nLabels changed: %d\nDropped lines: %d\nClass fixes: %d\n'
+            'Review queue: %d\n\nReport:\n%s'
+        ) % (
+            mode,
+            summary.get('images', 0),
+            summary.get('labels_changed', 0),
+            summary.get('lines_dropped', 0),
+            summary.get('lines_class_fixed', 0),
+            summary.get('review_images', 0),
+            os.path.abspath(out_dir),
+        )
+        review_dir = os.path.join(out_dir, 'review_queue')
+        html_path = os.path.join(out_dir, 'index.html')
+        review_html = os.path.join(out_dir, 'review.html')
+        if v.get('open_interactive_review') and os.path.isfile(
+                os.path.join(out_dir, 'label_self_refine_review.json')):
+            from libs.label_self_refine_review import RefineReviewServer
+            RefineReviewServer(out_dir).start(open_browser=True)
+        elif os.path.isfile(review_html):
+            reply_ir = QMessageBox.question(
+                self, 'Label Self-Refine',
+                msg + '\n\nOpen interactive review (confirm fixes)?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply_ir == QMessageBox.Yes:
+                from libs.label_self_refine_review import RefineReviewServer
+                RefineReviewServer(out_dir).start(open_browser=True)
+        elif os.path.isfile(html_path):
+            reply_html = QMessageBox.question(
+                self, 'Label Self-Refine',
+                msg + f'\n\nOpen HTML report?\n{html_path}',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply_html == QMessageBox.Yes:
+                import webbrowser
+                webbrowser.open(Path(html_path).as_uri())
+        elif os.path.isdir(review_dir) and summary.get('review_images', 0) > 0:
+            reply = QMessageBox.question(
+                self, 'Label Self-Refine',
+                msg + '\n\nOpen review_queue in ALT?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                from libs.alt_launcher import launch_alt
+                launch_alt(review_dir, split='auto')
+        else:
+            QMessageBox.information(self, 'Label Self-Refine', msg)
+        if not v.get('dry_run'):
+            self.rebuildFileAnnoMetaCache()
+            self.refreshImg()
+
+    def _guess_dataset_root(self):
+        """YOLO dataset root from data.yaml or current image/label folders."""
+        yaml_path = self._guess_data_yaml_for_train()
+        if yaml_path:
+            return os.path.dirname(os.path.abspath(yaml_path))
+        for folder in (self.img_folder_path, self.defaultSaveDir):
+            if not folder or not os.path.isdir(folder):
+                continue
+            norm = folder.replace('\\', '/').rstrip('/')
+            parts = norm.split('/')
+            if parts and parts[-1] in ('train', 'val', 'test') and len(parts) >= 2 and parts[-2] == 'images':
+                return os.path.abspath('/'.join(parts[:-2]))
+            if 'images' in parts:
+                idx = parts.index('images')
+                return os.path.abspath('/'.join(parts[:idx]))
+        return ''
+
+    def _underwater_offline_defaults(self):
+        s = self.settings
+        root = ustr(s.get(SETTING_UW_OFFLINE_DATASET, '') or '').strip()
+        if not root:
+            root = self._guess_dataset_root() or ''
+        return {
+            'dataset_root': root,
+            'copies': int(s.get(SETTING_UW_OFFLINE_COPIES, 2) or 2),
+            'strength': ustr(s.get(SETTING_UW_OFFLINE_STRENGTH, '') or 'medium'),
+            'split_train': self._settings_bool(s.get(SETTING_UW_OFFLINE_SPLIT_TRAIN, True)),
+            'split_val': self._settings_bool(s.get(SETTING_UW_OFFLINE_SPLIT_VAL, False)),
+            'split_test': self._settings_bool(s.get(SETTING_UW_OFFLINE_SPLIT_TEST, False)),
+        }
+
+    def _persist_underwater_offline_settings(self, v):
+        try:
+            self.settings[SETTING_UW_OFFLINE_DATASET] = ustr(v.get('dataset_root', '') or '')
+            self.settings[SETTING_UW_OFFLINE_COPIES] = int(v.get('copies', 2) or 2)
+            self.settings[SETTING_UW_OFFLINE_STRENGTH] = ustr(v.get('strength', '') or 'medium')
+            splits = v.get('splits') or ['train']
+            self.settings[SETTING_UW_OFFLINE_SPLIT_TRAIN] = 'train' in splits
+            self.settings[SETTING_UW_OFFLINE_SPLIT_VAL] = 'val' in splits
+            self.settings[SETTING_UW_OFFLINE_SPLIT_TEST] = 'test' in splits
+            self.settings.save()
+        except Exception as e:
+            print('[ALT][WARN] persist uw_offline settings:', e)
+
+    def underwater_offline_augment(self):
+        """Annotate-Tools → Underwater Offline Augment: expand existing YOLO splits in place."""
+        from libs.annotate_dialogs import UnderwaterOfflineAugmentDialog
+        from libs.underwater_augment import augment_train_split_offline
+        try:
+            dlg = UnderwaterOfflineAugmentDialog(self, self._underwater_offline_defaults())
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            v = dlg.values()
+            root = v['dataset_root']
+            if not root or not os.path.isdir(root):
+                QMessageBox.warning(self, 'Underwater Offline Augment', 'Dataset root is invalid.')
+                return
+            copies = int(v.get('copies', 0) or 0)
+            if copies <= 0:
+                QMessageBox.warning(self, 'Underwater Offline Augment', 'Copies must be at least 1.')
+                return
+            splits = v.get('splits') or ['train']
+            for sp in splits:
+                img_dir = os.path.join(root, 'images', sp)
+                lbl_dir = os.path.join(root, 'labels', sp)
+                if not os.path.isdir(img_dir) or not os.path.isdir(lbl_dir):
+                    QMessageBox.warning(
+                        self, 'Underwater Offline Augment',
+                        'Missing images/%s or labels/%s under:\n%s' % (sp, sp, root))
+                    return
+
+            self._persist_underwater_offline_settings(v)
+
+            progress = QProgressDialog('Underwater offline augment…', 'Cancel', 0, 0, self)
+            progress.setWindowTitle('Underwater Offline Augment')
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            QCoreApplication.processEvents()
+
+            log_lines = []
+
+            def _log(msg):
+                log_lines.append(msg)
+                print('[ALT][uw_offline]', msg)
+
+            total = augment_train_split_offline(
+                root,
+                copies=copies,
+                strength=str(v.get('strength', 'medium') or 'medium'),
+                splits=splits,
+                log=_log,
+            )
+            progress.setValue(1)
+
+            msg = (
+                'Underwater offline augment finished.\n\n'
+                'Dataset: %s\n'
+                'Splits: %s\n'
+                'Copies per image: %d\n'
+                'Strength: %s\n'
+                'New pairs written: %d'
+            ) % (
+                os.path.abspath(root),
+                ', '.join(splits),
+                copies,
+                v.get('strength', 'medium'),
+                total,
+            )
+            QMessageBox.information(self, 'Underwater Offline Augment', msg)
+            if self.img_folder_path and os.path.abspath(self.img_folder_path).startswith(
+                    os.path.abspath(root)):
+                self.rebuildFileAnnoMetaCache()
+                self.refreshImg()
+        except Exception:
+            self._report_error('underwater_offline_augment')
+
     def _yolo_labels_to_single_class(self, label_dir, class_name):
         """Remap all YOLO txt class ids to 0 and write classes.txt."""
+        from libs.dataset_paths import iter_files_with_ext
+
         class_name = (class_name or 'object').strip() or 'object'
-        for item in os.listdir(label_dir):
-            if not item.lower().endswith('.txt') or item.lower() == 'classes.txt':
-                continue
-            path = os.path.join(label_dir, item)
+        for _rel, path in iter_files_with_ext(label_dir, '.txt'):
             lines_out = []
             with open(path, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -1929,6 +2248,78 @@ class MainWindow(QMainWindow, WindowMixin):
         with open(os.path.join(label_dir, 'classes.txt'), 'w', encoding='utf-8') as f:
             f.write(class_name + '\n')
 
+    @staticmethod
+    def _settings_bool(v, default=False):
+        if isinstance(v, QVariant):
+            return v.toBool()
+        if isinstance(v, str):
+            return v.lower() in ('1', 'true', 'yes', 'on')
+        if v is None:
+            return default
+        return bool(v)
+
+    def _make_datasets_defaults(self):
+        """Last Make Datasets dialog values, with fallbacks to current ALT folders."""
+        s = self.settings
+
+        def _saved_str(key, fallback=''):
+            v = ustr(s.get(key, '') or '').strip()
+            return v if v else fallback
+
+        try:
+            split = float(s.get(SETTING_MAKE_DATASETS_SPLIT, 0.7))
+        except (TypeError, ValueError):
+            split = 0.7
+        split = max(0.5, min(0.95, split))
+        try:
+            test_split = float(s.get(SETTING_MAKE_DATASETS_TEST_SPLIT, 0.10))
+        except (TypeError, ValueError):
+            test_split = 0.10
+        test_split = max(0.05, min(0.40, test_split))
+
+        return {
+            'image_dir': _saved_str(
+                SETTING_MAKE_DATASETS_IMAGE,
+                self.img_folder_path or self.lastOpenDir or ''),
+            'label_dir': _saved_str(
+                SETTING_MAKE_DATASETS_LABEL,
+                self.xml_folder_path or self.defaultSaveDir or ''),
+            'output_dir': _saved_str(
+                SETTING_MAKE_DATASETS_OUTPUT,
+                os.path.join(APP_ROOT, 'datasets')),
+            'voc': self._settings_bool(s.get(SETTING_MAKE_DATASETS_VOC, False)),
+            'single_class': self._settings_bool(s.get(SETTING_MAKE_DATASETS_SINGLE_CLASS, False)),
+            'single_class_name': _saved_str(SETTING_MAKE_DATASETS_SINGLE_NAME, 'object'),
+            'classes_file': _saved_str(SETTING_MAKE_DATASETS_CLASSES_FILE, ''),
+            'split': split,
+            'create_test': self._settings_bool(s.get(SETTING_MAKE_DATASETS_CREATE_TEST, False)),
+            'test_split': test_split,
+            'uw_offline': self._settings_bool(s.get(SETTING_MAKE_DATASETS_UW_OFFLINE, False)),
+            'uw_offline_copies': int(s.get(SETTING_MAKE_DATASETS_UW_COPIES, 0) or 0),
+            'uw_offline_strength': _saved_str(SETTING_MAKE_DATASETS_UW_STRENGTH, 'medium'),
+        }
+
+    def _persist_make_datasets_settings(self, v):
+        try:
+            self.settings[SETTING_MAKE_DATASETS_IMAGE] = ustr(v.get('image_dir', '') or '')
+            self.settings[SETTING_MAKE_DATASETS_LABEL] = ustr(v.get('label_dir', '') or '')
+            self.settings[SETTING_MAKE_DATASETS_OUTPUT] = ustr(v.get('output_dir', '') or '')
+            self.settings[SETTING_MAKE_DATASETS_VOC] = bool(v.get('voc', False))
+            self.settings[SETTING_MAKE_DATASETS_SINGLE_CLASS] = bool(v.get('single_class', False))
+            self.settings[SETTING_MAKE_DATASETS_SINGLE_NAME] = ustr(
+                v.get('single_class_name', '') or 'object')
+            self.settings[SETTING_MAKE_DATASETS_CLASSES_FILE] = ustr(v.get('classes_file', '') or '')
+            self.settings[SETTING_MAKE_DATASETS_SPLIT] = float(v.get('split', 0.7))
+            self.settings[SETTING_MAKE_DATASETS_CREATE_TEST] = bool(v.get('create_test', False))
+            self.settings[SETTING_MAKE_DATASETS_TEST_SPLIT] = float(v.get('test_split', 0.10))
+            self.settings[SETTING_MAKE_DATASETS_UW_OFFLINE] = bool(v.get('uw_offline', False))
+            self.settings[SETTING_MAKE_DATASETS_UW_COPIES] = int(v.get('uw_offline_copies', 0) or 0)
+            self.settings[SETTING_MAKE_DATASETS_UW_STRENGTH] = ustr(
+                v.get('uw_offline_strength', '') or 'medium')
+            self.settings.save()
+        except Exception as e:
+            print('[ALT][WARN] persist make_datasets settings:', e)
+
     def make_datasets_unified(self):
         """Annotate-Tools → Make Datasets: train/val split with optional VOC convert & single-class."""
         from libs.annotate_dialogs import MakeDatasetsDialog
@@ -1936,15 +2327,11 @@ class MainWindow(QMainWindow, WindowMixin):
         from libs.voc_2_yolo_single import voc2yolo_one
         from libs.make_train_val_test_datasets import make_train_val
         try:
-            defaults = {
-                'image_dir': self.img_folder_path or '',
-                'label_dir': self.xml_folder_path or self.defaultSaveDir or '',
-                'output_dir': os.path.join(APP_ROOT, 'datasets'),
-            }
-            dlg = MakeDatasetsDialog(self, defaults)
+            dlg = MakeDatasetsDialog(self, self._make_datasets_defaults())
             if dlg.exec_() != QDialog.Accepted:
                 return
             v = dlg.values()
+            self._persist_make_datasets_settings(v)
             image_dr = v['image_dir']
             label_dr = v['label_dir']
             path_out = v['output_dir'] or os.path.join(APP_ROOT, 'datasets')
@@ -1969,6 +2356,8 @@ class MainWindow(QMainWindow, WindowMixin):
                             'Text (*.txt);;All files (*.*)')
                     if not classes_file:
                         return
+                    v['classes_file'] = classes_file
+                    self._persist_make_datasets_settings(v)
                     with open(classes_file, 'r', encoding='utf-8') as f:
                         classes = [x.strip() for x in f.read().splitlines() if x.strip()]
                     voc2yolo(txt_dr, label_dr, classes)
@@ -1977,25 +2366,50 @@ class MainWindow(QMainWindow, WindowMixin):
                 single_name = v['single_class_name'] or 'object'
                 self._yolo_labels_to_single_class(work_label_dr, single_name)
 
-            make_train_val(image_dr, work_label_dr, path_out, float(v['split']))
+            create_test = bool(v.get('create_test', False))
+            test_split = float(v.get('test_split', 0.0)) if create_test else 0.0
+            train_split = float(v['split'])
+            if create_test and train_split + test_split >= 0.99:
+                QMessageBox.warning(
+                    self, 'Make Datasets',
+                    'Train ratio + test ratio must be less than 1.0 (val needs the remainder).')
+                return
+
+            make_train_val(
+                image_dr, work_label_dr, path_out,
+                train_split, test_split,
+                uw_offline_copies=int(v.get('uw_offline_copies', 0) or 0) if v.get('uw_offline') else 0,
+                uw_offline_strength=str(v.get('uw_offline_strength', 'medium') or 'medium'),
+            )
             yaml_name = 'data_one_class.yaml' if v['single_class'] else 'data.yaml'
-            yaml_path = self._write_dataset_yaml(path_out, work_label_dr, yaml_name=yaml_name)
-            tr_i, va_i, tr_l, va_l, out_abs = self._count_make_dataset_outputs(path_out)
-            tot_i, tot_l = tr_i + va_i, tr_l + va_l
-            msg = (
-                'Train/val dataset created.\n\n'
-                'Train: %d images, %d labels\n'
-                'Val: %d images, %d labels\n'
-                'Total: %d images, %d labels\n\n'
-                'classes.txt written under output root, labels/train, labels/val.\n\n'
-                'Output:\n%s\n\nYAML:\n%s'
-            ) % (tr_i, tr_l, va_i, va_l, tot_i, tot_l, out_abs, os.path.abspath(yaml_path))
+            yaml_path = self._write_dataset_yaml(
+                path_out, work_label_dr, yaml_name=yaml_name, include_test=create_test)
+            tr_i, va_i, te_i, tr_l, va_l, te_l, out_abs = self._count_make_dataset_outputs(path_out)
+            tot_i, tot_l = tr_i + va_i + te_i, tr_l + va_l + te_l
+            if create_test:
+                msg = (
+                    'Train/val/test dataset created.\n\n'
+                    'Train: %d images, %d labels\n'
+                    'Val: %d images, %d labels\n'
+                    'Test: %d images, %d labels\n'
+                    'Total: %d images, %d labels\n\n'
+                    'classes.txt written under output root and labels/{train,val,test}.\n\n'
+                    'Output:\n%s\n\nYAML:\n%s'
+                ) % (tr_i, tr_l, va_i, va_l, te_i, te_l, tot_i, tot_l, out_abs, os.path.abspath(yaml_path))
+            else:
+                msg = (
+                    'Train/val dataset created.\n\n'
+                    'Train: %d images, %d labels\n'
+                    'Val: %d images, %d labels\n'
+                    'Total: %d images, %d labels\n\n'
+                    'classes.txt written under output root, labels/train, labels/val.\n\n'
+                    'Output:\n%s\n\nYAML:\n%s'
+                ) % (tr_i, tr_l, va_i, va_l, tot_i, tot_l, out_abs, os.path.abspath(yaml_path))
             QMessageBox.information(self, 'Done', msg)
         except Exception:
             self._report_error('make_datasets_unified')
 
     def autoLabelCurrentImg(self):
-        assert self.beginner()
         print('auto label current image')
         try:
             self._push_undo_checkpoint()
@@ -2056,7 +2470,7 @@ class MainWindow(QMainWindow, WindowMixin):
                                         imageShape, localImgPath=self.filePath)
                     for box, score, label, (pts, vis) in zip(xyxy, scores, labels, kpts_vis):
                         canon = self._canonical_label_in_yolo_class_list(label, class_list)
-                        writer.addKeypoints(pts, vis, canon, score)
+                        writer.addKeypoints(pts, vis, canon, difficult=False, score=score)
                     writer.save(targetFile=self.txtPath, classList=class_list)
                     self._sync_lists_after_autolabel(class_list)
                     wrote_pose = True
@@ -2078,7 +2492,10 @@ class MainWindow(QMainWindow, WindowMixin):
                                      imageShape, localImgPath=self.filePath)          
                 for box, score, label in zip(boxes, scores, labels):
                     canon = self._canonical_label_in_yolo_class_list(label, class_list)
-                    writer.addBndBox(int(box[0]), int(box[1]), int(box[2]), int(box[3]), canon, score)
+                    writer.addBndBox(
+                        int(box[0]), int(box[1]), int(box[2]), int(box[3]),
+                        canon, difficult=False, score=score,
+                    )
                 writer.save(targetFile=self.txtPath, classList=class_list)
                 self._sync_lists_after_autolabel(class_list)
 
@@ -3590,6 +4007,7 @@ class MainWindow(QMainWindow, WindowMixin):
                      'change_label':self.change_label_name,'c4':self.change_label_name,
                      'choose_autolabel_model':self.choose_autolabel_model,'csm':self.choose_autolabel_model,
                      'auto_label_batch':self.auto_label_batch,'c6':self.auto_label_batch,
+                     'underwater_offline_augment':self.underwater_offline_augment, 'c5':self.underwater_offline_augment,
                      'make_datasets':self.make_datasets_unified, 'c8':self.make_datasets_unified,
                      'training_model':self.training_model,'c9':self.training_model,
                      # 'data_agument':self.data_auto_agument,'c8':self.data_auto_agument,
@@ -4556,6 +4974,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 'conf': float(self.autoLabelConf),
                 'pred_iou': float(self.autoLabelPredIou),
                 'dedup_iou': float(self.autoLabelDedupIou),
+                'cross_class_dedup': bool(getattr(self, 'autoLabelCrossClassDedup', True)),
             }
             dlg = AnnotateVideosDialog(self, n_videos=len(paths), defaults=defaults)
             if dlg.exec_() != QDialog.Accepted:
@@ -4586,6 +5005,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 class_list=class_list,
                 task_hint=v['task_hint'],
                 save_scores=bool(v.get('save_score', True)),
+                cross_class_dedup=bool(v.get('cross_class_dedup', True)),
                 progress_cb=progress_cb,
                 cancel_cb=progress.wasCanceled,
             )
@@ -4842,6 +5262,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def _infer_dataset_names(self, label_dir):
+        from libs.dataset_paths import iter_files_with_ext
+
         classes_path = os.path.join(label_dir, 'classes.txt')
         if os.path.isfile(classes_path):
             with open(classes_path, 'r', encoding='utf-8') as f:
@@ -4850,10 +5272,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 return names
 
         max_cls = -1
-        for item in os.listdir(label_dir):
-            if not item.lower().endswith('.txt') or item.lower() == 'classes.txt':
-                continue
-            txt_path = os.path.join(label_dir, item)
+        for _rel, txt_path in iter_files_with_ext(label_dir, '.txt'):
             try:
                 with open(txt_path, 'r', encoding='utf-8') as f:
                     lines = f.read().splitlines()
@@ -4872,27 +5291,26 @@ class MainWindow(QMainWindow, WindowMixin):
             return ['class_%d' % i for i in range(max_cls + 1)]
         return ['object']
 
-    def _write_yolo_classes_txt_sidecars(self, dataset_root, names):
-        """Write classes.txt at dataset root and under labels/train & labels/val for inspection."""
+    def _write_yolo_classes_txt_sidecars(self, dataset_root, names, include_test=False):
+        """Write classes.txt at dataset root and under labels splits for inspection."""
         lines = [str(n).strip() for n in names if str(n).strip()]
         if not lines:
             lines = ['object']
         body = '\n'.join(lines) + '\n'
         root = os.path.abspath(dataset_root)
-        paths = (
-            os.path.join(root, 'classes.txt'),
-            os.path.join(root, 'labels', 'train', 'classes.txt'),
-            os.path.join(root, 'labels', 'val', 'classes.txt'),
-        )
+        split_names = ('train', 'val', 'test') if include_test else ('train', 'val')
+        paths = [os.path.join(root, 'classes.txt')]
+        paths.extend(os.path.join(root, 'labels', sp, 'classes.txt') for sp in split_names)
         for p in paths:
             parent = os.path.dirname(p)
             if parent:
                 os.makedirs(parent, exist_ok=True)
             with open(p, 'w', encoding='utf-8') as f:
                 f.write(body)
-        print('[ALT][INFO][make_datasets] classes.txt written (%d classes) -> root, labels/train, labels/val' % len(lines))
+        where = ', '.join('labels/%s' % sp for sp in split_names)
+        print('[ALT][INFO][make_datasets] classes.txt written (%d classes) -> root, %s' % (len(lines), where))
 
-    def _write_dataset_yaml(self, dataset_root, label_dir, yaml_name='data.yaml'):
+    def _write_dataset_yaml(self, dataset_root, label_dir, yaml_name='data.yaml', include_test=False):
         names = self._infer_dataset_names(label_dir)
         yaml_path = os.path.join(dataset_root, yaml_name)
         dataset_root_norm = os.path.abspath(dataset_root).replace('\\', '/')
@@ -4900,15 +5318,19 @@ class MainWindow(QMainWindow, WindowMixin):
             'path: %s' % dataset_root_norm,
             'train: images/train',
             'val: images/val',
+        ]
+        if include_test:
+            lines.append('test: images/test')
+        lines.extend([
             'nc: %d' % len(names),
             'names:'
-        ]
+        ])
         for i, name in enumerate(names):
             safe_name = str(name).replace("'", "\\'")
             lines.append("  %d: '%s'" % (i, safe_name))
         with open(yaml_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
-        self._write_yolo_classes_txt_sidecars(dataset_root, names)
+        self._write_yolo_classes_txt_sidecars(dataset_root, names, include_test=include_test)
         return yaml_path
 
     def _normalize_yaml_for_training_linebased(self, yaml_file, yaml_dir):
@@ -5173,8 +5595,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 if f.lower().endswith('.txt') and f.lower() != 'classes.txt')
 
         tr_i, va_i = count_imgs('train'), count_imgs('val')
+        te_i = count_imgs('test')
         tr_l, va_l = count_lbl('train'), count_lbl('val')
-        return tr_i, va_i, tr_l, va_l, root
+        te_l = count_lbl('test')
+        return tr_i, va_i, te_i, tr_l, va_l, te_l, root
 
     
     def _guess_data_yaml_for_train(self):

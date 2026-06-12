@@ -53,10 +53,13 @@ from libs.fvt_train_runner import (
 from libs.train_monitor import (
     TensorBoardServer, ResultsWatcher, collect_metrics,
     find_latest_run_dir, list_matching_run_dirs, resolve_run_dir,
+    pick_tensorboard_logdir, has_tensorboard_events,
 )
 from libs.train_augment_panel import AugmentPanel
 from libs.hyperparam_search import HyperparamSearchPanel
 from libs.test_report import run_test_report, inspect_dataset_directory, format_inspect_report
+from libs.label_self_refine_worker import LabelSelfRefineWorker
+from libs.annotate_dialogs import LabelSelfRefineDialog
 from libs.alt_launcher import launch_alt
 
 
@@ -218,6 +221,7 @@ class TestReportWorker(QThread):
                 run_ultralytics_val=bool(self.opts.get("run_ultralytics_val", True)),
                 export_dataset=bool(self.opts.get("export_dataset", False)),
                 export_dataset_dir=self.opts.get("export_dataset_dir") or None,
+                export_label_mode=str(self.opts.get("export_label_mode", "gt")),
                 log=_log,
                 progress=_prog,
             )
@@ -313,11 +317,24 @@ class _TestReportDialog(QDialog):
         ds_row = QHBoxLayout()
         ds_row.addWidget(self.export_ds_edit)
         ds_row.addWidget(ds_btn)
+        self.export_label_combo = QComboBox()
+        self.export_label_combo.addItem("原标注 (GT)", "gt")
+        self.export_label_combo.addItem("预测标注 (Predict)", "predict")
+        idx_lbl = self.export_label_combo.findData(defaults.get("export_label_mode", "gt"))
+        if idx_lbl >= 0:
+            self.export_label_combo.setCurrentIndex(idx_lbl)
+        self.export_label_combo.setToolTip(
+            "GT：复制数据集原标注，便于修正错标/漏标。\n"
+            "Predict：写入模型预测框（含 conf），便于对照预测结果或作为初稿。"
+        )
+
         self.export_ds_check.toggled.connect(self.export_ds_edit.setEnabled)
         self.export_ds_check.toggled.connect(ds_btn.setEnabled)
+        self.export_ds_check.toggled.connect(self.export_label_combo.setEnabled)
         enabled = self.export_ds_check.isChecked()
         self.export_ds_edit.setEnabled(enabled)
         ds_btn.setEnabled(enabled)
+        self.export_label_combo.setEnabled(enabled)
 
         form.addRow("权重 (best.pt):", w_row)
         form.addRow("输出目录:", o_row)
@@ -330,6 +347,7 @@ class _TestReportDialog(QDialog):
         form.addRow("测试图片数量:", self.sample_spin)
         form.addRow("", self.val_check)
         form.addRow("", self.export_ds_check)
+        form.addRow("导出标注来源:", self.export_label_combo)
         form.addRow("数据集导出目录:", ds_row)
         layout.addLayout(form)
 
@@ -341,7 +359,8 @@ class _TestReportDialog(QDialog):
         tip = QLabel(
             "yaml 模式：按界面 data yaml 的 train/val/test 划分评估。\n"
             "目录模式：选择数据集根目录或 images/<split>，自动检查 YOLO 结构。\n"
-            "默认评估全部图像；低分判定为 F1<1，导出时全部低分样本写入 images/<划分>/。"
+            "默认评估全部图像；低分判定为 F1<1，导出时全部低分样本写入 images/<划分>/。\n"
+            "导出标注可选原标注 (GT) 或预测框 (Predict，含 conf)。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet("color:#666;font-size:10px;")
@@ -460,6 +479,7 @@ class _TestReportDialog(QDialog):
             "run_ultralytics_val": self.val_check.isChecked(),
             "export_dataset": self.export_ds_check.isChecked(),
             "export_dataset_dir": self.export_ds_edit.text().strip(),
+            "export_label_mode": self.export_label_combo.currentData() or "gt",
         }
 
 
@@ -1031,6 +1051,8 @@ class TabbedTrainGUI(QWidget):
         super().__init__()
         self._worker: TrainingWorker = None
         self._test_worker: TestReportWorker = None
+        self._refine_worker: LabelSelfRefineWorker = None
+        self._refine_review_server = None
         self._last_report_html: str = ""
         self._last_report_split: str = "test"
         self._tensorboard = TensorBoardServer()
@@ -1170,6 +1192,12 @@ class TabbedTrainGUI(QWidget):
         )
         self.test_report_btn.clicked.connect(self._run_test_report)
 
+        self.refine_btn = QPushButton("标注自修正")
+        self.refine_btn.setToolTip(
+            "用当前模型对比 GT 与预测，保守修正标注（可先 dry-run 看报告）"
+        )
+        self.refine_btn.clicked.connect(self._run_label_self_refine)
+
         self.alt_btn = QPushButton("打开 ALT")
         self.alt_btn.setToolTip("启动 Auto Label Tool；可自动打开当前 data yaml 对应数据集")
         self.alt_btn.clicked.connect(lambda: self._launch_alt())
@@ -1177,6 +1205,7 @@ class TabbedTrainGUI(QWidget):
         btn_layout.addWidget(self.start_btn)
         btn_layout.addWidget(self.stop_btn)
         btn_layout.addWidget(self.test_report_btn)
+        btn_layout.addWidget(self.refine_btn)
         btn_layout.addWidget(self.alt_btn)
         btn_layout.addWidget(self.terminal_btn)
         btn_layout.addWidget(self.tb_btn)
@@ -1284,6 +1313,7 @@ class TabbedTrainGUI(QWidget):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.test_report_btn.setEnabled(False)
+        self.refine_btn.setEnabled(False)
         self.tabs.setEnabled(False)
         # 进度由 msg_label 单行刷新；跑马灯 progress_bar 会与 QLabel 争用绘制导致 QPainter 警告
         self.progress_bar.setVisible(False)
@@ -1404,6 +1434,38 @@ class TabbedTrainGUI(QWidget):
         stamp = _time.strftime("%Y%m%d_%H%M%S")
         return os.path.join(run_dir, f"test_report_{stamp}")
 
+    def _default_refine_out_dir(self) -> str:
+        task = self.tab_basic.task_combo.currentText()
+        project = self.tab_basic.project_edit.text().strip()
+        name = self.tab_basic.name_edit.text().strip() or "train"
+        run_dir = find_latest_run_dir(task, project, name)
+        stamp = _time.strftime("%Y%m%d_%H%M%S")
+        return os.path.join(run_dir, f"label_self_refine_{stamp}")
+
+    def _latest_refine_report_dir(self) -> Optional[str]:
+        """Most recent label_self_refine_* folder under the current run that has a report CSV."""
+        task = self.tab_basic.task_combo.currentText()
+        project = self.tab_basic.project_edit.text().strip()
+        name = self.tab_basic.name_edit.text().strip() or "train"
+        run_dir = find_latest_run_dir(task, project, name)
+        if not run_dir or not os.path.isdir(run_dir):
+            return None
+        candidates = []
+        try:
+            for entry in os.listdir(run_dir):
+                if not entry.startswith("label_self_refine_"):
+                    continue
+                folder = os.path.join(run_dir, entry)
+                csv_path = os.path.join(folder, "label_self_refine_report.csv")
+                if os.path.isfile(csv_path):
+                    candidates.append(folder)
+        except OSError:
+            return None
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return candidates[0]
+
     def _resolve_alt_dataset_root(self, preferred: str = "") -> str:
         """Pick dataset root for ALT (--datasets)."""
         if preferred and os.path.isdir(preferred):
@@ -1460,6 +1522,7 @@ class TabbedTrainGUI(QWidget):
             "dataset_dir": "",
             "export_dataset": False,
             "export_dataset_dir": "",
+            "export_label_mode": "gt",
         }
         dlg = _TestReportDialog(self, defaults)
         if dlg.exec_() != QDialog.Accepted:
@@ -1490,6 +1553,7 @@ class TabbedTrainGUI(QWidget):
         self.progress_bar.setValue(0)
         self.start_btn.setEnabled(False)
         self.test_report_btn.setEnabled(False)
+        self.refine_btn.setEnabled(False)
         self.tabs.setEnabled(False)
 
         self._test_worker = TestReportWorker(opts)
@@ -1511,6 +1575,7 @@ class TabbedTrainGUI(QWidget):
     def _on_test_report_finished(self, status: str, html_path: str, export_dataset_dir: str):
         self.start_btn.setEnabled(True)
         self.test_report_btn.setEnabled(True)
+        self.refine_btn.setEnabled(True)
         self.tabs.setEnabled(True)
         self.progress_bar.setVisible(False)
         if status == "finished" and html_path:
@@ -1539,6 +1604,171 @@ class TabbedTrainGUI(QWidget):
         else:
             self.msg_label.setText("测试报告生成失败，请查看日志")
             QMessageBox.warning(self, "失败", "测试报告生成失败，请查看日志面板。")
+
+    def _run_label_self_refine(self):
+        if self._refine_worker and self._refine_worker.isRunning():
+            QMessageBox.information(self, "请稍候", "标注自修正正在运行中…")
+            return
+        if self._worker and self._worker.isRunning():
+            QMessageBox.information(self, "请稍候", "训练进行中，请稍后再试。")
+            return
+        data_yaml = self.tab_basic.yaml_edit.text().strip()
+        if not data_yaml or not os.path.isfile(data_yaml):
+            QMessageBox.warning(self, "参数错误", "请先选择有效的 data yaml")
+            return
+        weights = self._resolve_report_weights()
+        latest_report = self._latest_refine_report_dir()
+        defaults = {
+            "weights": weights or "",
+            "data_yaml": data_yaml,
+            "out_dir": latest_report or self._default_refine_out_dir(),
+            "split_train": True,
+            "split_val": True,
+            "split_test": False,
+            "dry_run": True,
+            "review_only": False,
+            "html_only": bool(latest_report),
+            "export_html": True,
+            "open_interactive_review": False,
+        }
+        dlg = LabelSelfRefineDialog(self, defaults)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        opts = dlg.values()
+        if not opts.get("review_only") and not opts.get("html_only"):
+            if not opts.get("weights") or not os.path.isfile(opts["weights"]):
+                QMessageBox.warning(self, "参数错误", "权重文件无效")
+                return
+        if not opts.get("data_yaml") or not os.path.isfile(opts["data_yaml"]):
+            QMessageBox.warning(self, "参数错误", "data.yaml 无效")
+            return
+        if not opts.get("out_dir"):
+            QMessageBox.warning(self, "参数错误", "请指定报告输出目录")
+            return
+        device = self.tab_hardware.device_combo.currentText()
+        opts["device"] = device if device != "auto" else ("0" if torch.cuda.is_available() else "cpu")
+
+        self.log_box.setVisible(True)
+        if opts.get("html_only"):
+            mode = "HTML 摘要"
+        elif opts.get("review_only"):
+            mode = "仅导出 review"
+        else:
+            mode = "dry-run" if opts.get("dry_run") else "写入标注"
+        self.log_box.append(f"\n>>> 开始标注自修正 ({mode}) → {opts['out_dir']}\n")
+        self.msg_label.setText("正在运行标注自修正…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.start_btn.setEnabled(False)
+        self.test_report_btn.setEnabled(False)
+        self.refine_btn.setEnabled(False)
+        self.tabs.setEnabled(False)
+        QApplication.processEvents()
+        self._refine_worker = LabelSelfRefineWorker(opts)
+        self._refine_worker.log_signal.connect(
+            self._on_refine_log, Qt.QueuedConnection,
+        )
+        self._refine_worker.progress_signal.connect(
+            self._on_refine_progress, Qt.QueuedConnection,
+        )
+        self._refine_worker.finished_signal.connect(
+            self._on_refine_finished, Qt.QueuedConnection,
+        )
+        self._refine_worker.start()
+
+    def _on_refine_log(self, msg: str):
+        self.log_box.moveCursor(QTextCursor.End)
+        self.log_box.insertPlainText(msg + "\n")
+        self.msg_label.setText(msg[:120])
+
+    def _on_refine_progress(self, cur: int, total: int, name: str):
+        if total > 0:
+            self.progress_bar.setValue(int(cur * 100 / total))
+        self.msg_label.setText(f"标注自修正 {cur}/{total}: {name}")
+
+    def _on_refine_finished(self, status: str, report_dir: str, opts: dict):
+        self.start_btn.setEnabled(True)
+        self.test_report_btn.setEnabled(True)
+        self.refine_btn.setEnabled(True)
+        self.tabs.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        if status != "finished" or not report_dir:
+            self.msg_label.setText("标注自修正失败，请查看日志")
+            QMessageBox.warning(self, "失败", "标注自修正失败，请查看日志面板。")
+            return
+        summary_path = os.path.join(report_dir, "label_self_refine_summary.json")
+        html_path = os.path.join(report_dir, "index.html")
+        review_dir = os.path.join(report_dir, "review_queue")
+        self.msg_label.setText(f"标注自修正完成: {report_dir}")
+        msg = f"报告已保存至:\n{report_dir}"
+        if os.path.isfile(html_path):
+            msg += f"\n\nHTML: {html_path}"
+        elif os.path.isfile(summary_path):
+            msg += f"\n\n摘要: {summary_path}"
+        review_only = opts.get("review_only", False)
+        html_only = opts.get("html_only", False)
+        if html_only:
+            msg += "\n\n已从 CSV 生成 HTML 摘要（未重新推理）。"
+        elif review_only:
+            msg += "\n\n已从现有报告 CSV 导出 review_queue（未重新推理）。"
+        else:
+            dry = opts.get("dry_run", True)
+            if dry:
+                msg += "\n\n当前为 dry-run，未修改磁盘标注。取消勾选 dry-run 后再次运行可写入修正。"
+            else:
+                msg += "\n\n已备份原标注并写入修正结果。"
+
+        review_html = os.path.join(report_dir, "review.html")
+        manifest = os.path.join(report_dir, "label_self_refine_review.json")
+
+        if opts.get("open_interactive_review") and os.path.isfile(manifest):
+            try:
+                from libs.label_self_refine_review import RefineReviewServer
+                self._refine_review_server = RefineReviewServer(report_dir)
+                url = self._refine_review_server.start(open_browser=True)
+                msg += f"\n\n交互复核: {url}"
+            except Exception as exc:
+                msg += f"\n\n交互复核启动失败: {exc}"
+
+        if os.path.isfile(html_path):
+            reply_html = QMessageBox.question(
+                self,
+                "标注自修正完成",
+                msg + "\n\n是否在浏览器中打开 HTML 报告？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply_html == QMessageBox.Yes:
+                import webbrowser
+                webbrowser.open(Path(html_path).as_uri())
+        elif os.path.isfile(review_html):
+            reply_ir = QMessageBox.question(
+                self,
+                "标注自修正完成",
+                msg + "\n\n是否打开交互复核页面（可逐条确认修正）？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply_ir == QMessageBox.Yes:
+                try:
+                    from libs.label_self_refine_review import RefineReviewServer
+                    self._refine_review_server = RefineReviewServer(report_dir)
+                    self._refine_review_server.start(open_browser=True)
+                except Exception as exc:
+                    QMessageBox.warning(self, "交互复核", str(exc))
+        elif os.path.isdir(review_dir):
+            reply_alt = QMessageBox.question(
+                self,
+                "标注自修正完成",
+                msg + f"\n\n是否在 ALT 中打开待复核样本？\n{review_dir}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply_alt == QMessageBox.Yes:
+                self._launch_alt(review_dir, split="auto")
+        else:
+            QMessageBox.information(self, "标注自修正完成", msg)
 
     def _on_metrics(self, metrics: dict):
         """ResultsWatcher 回调：更新指标显示。"""
@@ -1571,6 +1801,7 @@ class TabbedTrainGUI(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.test_report_btn.setEnabled(True)
+        self.refine_btn.setEnabled(True)
         self.tabs.setEnabled(True)
         self.progress_bar.setVisible(False)
         self._log_timer.stop()
@@ -1632,34 +1863,40 @@ class TabbedTrainGUI(QWidget):
     # ── TensorBoard ──
 
     def _open_tensorboard(self):
-        runs_root = os.path.join(repo_root(), "runs")
         task = self.tab_basic.task_combo.currentText()
         project = self.tab_basic.project_edit.text().strip()
         name = self.tab_basic.name_edit.text().strip() or "train"
-        cur_run = find_latest_run_dir(task, project, name)
+        logdir, hint = pick_tensorboard_logdir(task, project, name, repo=repo_root())
+        has_events = has_tensorboard_events(logdir.replace("/", os.sep))
 
         class _TBThread(QThread):
             result = pyqtSignal(str)
+
             def run(self):
                 self.msgs = []
+
                 def _cb(m):
                     self.msgs.append(m)
-                # 同时跟踪当前训练目录和所有历史记录
-                if self._cur_run and os.path.isdir(self._cur_run):
-                    spec = f"current:{self._cur_run},all:{self._runs_root}"
-                    self._tb.start(logdir_spec=spec, callback=_cb)
-                else:
-                    self._tb.start(logdir=self._runs_root, callback=_cb)
 
-        self._current_run_dir = cur_run
+                self._tb.stop()
+                self._tb.start(logdir=self._logdir, callback=_cb, force_restart=True)
+
+        self._current_run_dir = logdir.replace("/", os.sep)
         self._tb_thread = _TBThread()
         self._tb_thread._tb = self._tensorboard
-        self._tb_thread._cur_run = self._current_run_dir
-        self._tb_thread._runs_root = runs_root
-        self._tb_thread.result = self._tb_thread.result  # keep ref
+        self._tb_thread._logdir = logdir
         self._tb_thread.finished.connect(self._on_tb_ready)
         self._tb_thread.start()
-        self.msg_label.setText("正在启动 TensorBoard...")
+        if has_events:
+            self.msg_label.setText(f"正在启动 TensorBoard… ({hint})")
+        else:
+            self.msg_label.setText(
+                f"正在启动 TensorBoard… ({hint}；尚无 event 文件，训练开始后刷新页面)"
+            )
+            self.log_box.append(
+                "[TensorBoard] 当前目录尚无 events.out.tfevents.*。"
+                "请确认训练已跑完至少 1 个 epoch，或查看同目录 results.csv / results.png。"
+            )
 
     def _run_in_terminal(self):
         """在独立 cmd 窗口执行训练（崩溃后窗口保持打开，显示错误信息）。"""
@@ -1728,9 +1965,11 @@ class TabbedTrainGUI(QWidget):
         "hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale",
         "shear", "perspective", "flipud", "fliplr", "mosaic", "mixup",
         "copy_paste", "erasing",
+        "uw_augment_p", "uw_augment_strength",
     )
     _BOOL_INI_KEYS = (
         "pretrained", "resume", "exist_ok", "val", "plots", "amp", "tune_enabled", "cos_lr",
+        "uw_augment", "uw_include_enhance",
     )
 
     def _session_config_path(self) -> str:
@@ -1792,6 +2031,9 @@ class TabbedTrainGUI(QWidget):
             "patience": s.get("patience", "15"),
         })
         aug_vals = {k: s.get(k) for k in self._AUG_SAVE_KEYS if s.get(k) is not None}
+        for bk in ("uw_augment", "uw_include_enhance"):
+            if s.get(bk) is not None:
+                aug_vals[bk] = s.get(bk)
         if aug_vals:
             self.tab_augment.set_values(aug_vals)
         self.tab_hardware.set_values({
