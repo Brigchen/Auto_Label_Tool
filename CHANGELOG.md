@@ -25,12 +25,15 @@ All notable changes to this project are documented here.
 - **Train augment panel**: added underwater augment controls (`uw_augment`, `uw_augment_p`, `uw_augment_strength`, `uw_include_enhance`).
 - **Test report dialog**: added label source dropdown (GT / Predict with conf).
 - **ALT Make Datasets dialog**: persistent settings; test split checkbox; underwater offline augment options.
+- **Label Self-Refine dialog**: simplified mode selection (dropdown instead of checkboxes); parameters now persist to `config_FVT.ini`.
+- **Label Self-Refine HTML report**: simplified `index.html` (statistics summary only); added interactive review button; removed duplicate preview tables.
 
 ### Fixed
 
 - Six-column YOLO label compatibility during Ultralytics val/train (columns: class x y w h conf).
 - Windows TensorBoard `--logdir_spec` path parsing issues (backslash conflicts).
 - Auto-label score field handling for keypoints and bounding boxes.
+- **difficult/score conversion**: score > 0.5 → difficult=0 (not difficult), score ≤ 0.5 → difficult=1 (difficult).
 
 ---
 

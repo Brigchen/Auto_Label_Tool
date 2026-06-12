@@ -1618,19 +1618,34 @@ class TabbedTrainGUI(QWidget):
             return
         weights = self._resolve_report_weights()
         latest_report = self._latest_refine_report_dir()
-        defaults = {
-            "weights": weights or "",
-            "data_yaml": data_yaml,
-            "out_dir": latest_report or self._default_refine_out_dir(),
-            "split_train": True,
-            "split_val": True,
-            "split_test": False,
-            "dry_run": True,
-            "review_only": False,
-            "html_only": bool(latest_report),
-            "export_html": True,
-            "open_interactive_review": False,
-        }
+        
+        # Use saved defaults if available, otherwise use hardcoded defaults
+        if hasattr(self, "_refine_defaults") and self._refine_defaults:
+            defaults = dict(self._refine_defaults)
+            # Override with current context
+            defaults["weights"] = weights or defaults.get("weights", "")
+            defaults["data_yaml"] = data_yaml
+            defaults["out_dir"] = latest_report or self._default_refine_out_dir()
+        else:
+            defaults = {
+                "weights": weights or "",
+                "data_yaml": data_yaml,
+                "out_dir": latest_report or self._default_refine_out_dir(),
+                "split_train": True,
+                "split_val": True,
+                "split_test": False,
+                "dry_run": True,
+                "iou_match": 0.5,
+                "min_fix_conf": 0.65,
+                "min_score_keep": 0.35,
+                "drop_low_score": True,
+                "fix_wrong_class": True,
+                "cross_class_dedup": True,
+                "export_review": True,
+                "export_html": True,
+                "open_interactive_review": False,
+                "mode": "full",
+            }
         dlg = LabelSelfRefineDialog(self, defaults)
         if dlg.exec_() != QDialog.Accepted:
             return
@@ -1688,6 +1703,14 @@ class TabbedTrainGUI(QWidget):
         self.msg_label.setText(f"标注自修正 {cur}/{total}: {name}")
 
     def _on_refine_finished(self, status: str, report_dir: str, opts: dict):
+        # Save user preferences for next run
+        if opts:
+            self._refine_defaults = dict(opts)
+            try:
+                self._save_config()
+            except Exception:
+                pass
+        
         self.start_btn.setEnabled(True)
         self.test_report_btn.setEnabled(True)
         self.refine_btn.setEnabled(True)
@@ -2053,6 +2076,30 @@ class TabbedTrainGUI(QWidget):
             "iterations": s.get("iterations", "100"),
             "tune_epochs": s.get("tune_epochs", "50"),
         })
+        # Load label self-refine defaults
+        if cfg.has_section("label_self_refine"):
+            rs = cfg["label_self_refine"]
+            self._refine_defaults = {
+                "weights": rs.get("weights", ""),
+                "data_yaml": rs.get("data_yaml", ""),
+                "out_dir": rs.get("out_dir", ""),
+                "split_train": rs.getboolean("split_train", True),
+                "split_val": rs.getboolean("split_val", True),
+                "split_test": rs.getboolean("split_test", False),
+                "dry_run": rs.getboolean("dry_run", True),
+                "iou_match": rs.getfloat("iou_match", 0.5),
+                "min_fix_conf": rs.getfloat("min_fix_conf", 0.65),
+                "min_score_keep": rs.getfloat("min_score_keep", 0.35),
+                "drop_low_score": rs.getboolean("drop_low_score", True),
+                "fix_wrong_class": rs.getboolean("fix_wrong_class", True),
+                "cross_class_dedup": rs.getboolean("cross_class_dedup", True),
+                "export_review": rs.getboolean("export_review", True),
+                "export_html": rs.getboolean("export_html", True),
+                "open_interactive_review": rs.getboolean("open_interactive_review", False),
+                "mode": rs.get("mode", "full"),  # full / review_only / html_only
+            }
+        else:
+            self._refine_defaults = None
 
     def _save_config(self, params: Optional[dict] = None):
         if params is None:
@@ -2096,6 +2143,32 @@ class TabbedTrainGUI(QWidget):
 
         with open(path, "w", encoding="utf-8") as f:
             cfg.write(f)
+
+        # Save label self-refine defaults if available
+        if hasattr(self, "_refine_defaults") and self._refine_defaults:
+            cfg2 = configparser.ConfigParser()
+            cfg2.read(path, encoding="utf-8")
+            cfg2["label_self_refine"] = {
+                "weights": str(self._refine_defaults.get("weights", "")),
+                "data_yaml": str(self._refine_defaults.get("data_yaml", "")),
+                "out_dir": str(self._refine_defaults.get("out_dir", "")),
+                "split_train": str(self._refine_defaults.get("split_train", True)).lower(),
+                "split_val": str(self._refine_defaults.get("split_val", True)).lower(),
+                "split_test": str(self._refine_defaults.get("split_test", False)).lower(),
+                "dry_run": str(self._refine_defaults.get("dry_run", True)).lower(),
+                "iou_match": str(self._refine_defaults.get("iou_match", 0.5)),
+                "min_fix_conf": str(self._refine_defaults.get("min_fix_conf", 0.65)),
+                "min_score_keep": str(self._refine_defaults.get("min_score_keep", 0.35)),
+                "drop_low_score": str(self._refine_defaults.get("drop_low_score", True)).lower(),
+                "fix_wrong_class": str(self._refine_defaults.get("fix_wrong_class", True)).lower(),
+                "cross_class_dedup": str(self._refine_defaults.get("cross_class_dedup", True)).lower(),
+                "export_review": str(self._refine_defaults.get("export_review", True)).lower(),
+                "export_html": str(self._refine_defaults.get("export_html", True)).lower(),
+                "open_interactive_review": str(self._refine_defaults.get("open_interactive_review", False)).lower(),
+                "mode": str(self._refine_defaults.get("mode", "full")),
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                cfg2.write(f)
 
     # ── 窗口关闭 ──
 

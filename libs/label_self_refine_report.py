@@ -236,10 +236,15 @@ def write_refine_html_report(
     data_yaml: str = "",
     weights: str = "",
     dry_run: Optional[bool] = None,
-    max_preview: int = 36,
+    max_preview: int = 10,  # Reduced from 36 to 10 for summary only
     log: LogFn = print,
 ) -> str:
-    """Build index.html from label_self_refine_report.csv. Returns html path."""
+    """Build index.html from label_self_refine_report.csv.
+    
+    Simplified version: only shows statistics summary and diagnosis.
+    For detailed sample preview, use interactive review (review.html).
+    Returns html path.
+    """
     out_dir = str(Path(out_dir).resolve())
     csv_path = csv_path or os.path.join(out_dir, "label_self_refine_report.csv")
     actions = load_actions_from_csv(csv_path)
@@ -257,6 +262,7 @@ def write_refine_html_report(
     preview_dir.mkdir(parents=True, exist_ok=True)
     used_preview: Set[str] = set()
 
+    # Only render a few representative samples for quick visual check
     def _samples_html(sample_actions: List[CsvAction], limit: int) -> str:
         rows = []
         for i, a in enumerate(sample_actions[:limit], start=1):
@@ -264,7 +270,7 @@ def write_refine_html_report(
             if rel:
                 vis = (
                     f"<a href='{html.escape(rel)}' target='_blank'>"
-                    f"<img src='{html.escape(rel)}' width='220'/></a>"
+                    f"<img src='{html.escape(rel)}' width='180'/></a>"
                 )
             else:
                 vis = "<span style='color:#888;'>—</span>"
@@ -273,13 +279,13 @@ def write_refine_html_report(
                 f"<td>{html.escape(os.path.basename(a.image_path))}</td>"
                 f"<td>{html.escape(a.split)}</td>"
                 f"<td>{html.escape(_action_label(a.action))}</td>"
-                f"<td>{html.escape(a.detail)}</td></tr>"
+                f"<td>{html.escape(a.detail[:60])}...</td></tr>"
             )
         return "".join(rows) if rows else "<tr><td colspan='6'>无</td></tr>"
 
+    # Pick only a few representative samples (not full preview)
     review_samples = _pick_samples(actions, "review", max_preview)
-    fix_samples = _pick_samples(actions, "fix_class", min(24, max_preview))
-    drop_samples = _pick_samples(actions, "drop_low_score", min(12, max_preview))
+    fix_samples = _pick_samples(actions, "fix_class", min(5, max_preview))
 
     total_images = int(summary_meta.get("images") or analysis.images_in_csv)
     labels_changed = int(summary_meta.get("labels_changed") or analysis.images_changed)
@@ -327,6 +333,8 @@ def write_refine_html_report(
 
     review_queue = os.path.join(out_dir, "review_queue")
     has_review = os.path.isdir(review_queue)
+    review_html_path = os.path.join(out_dir, "review.html")
+    has_review_html = os.path.isfile(review_html_path)
 
     findings = []
     if review_n > 0:
@@ -355,6 +363,27 @@ def write_refine_html_report(
         if findings else "<p>无</p>"
     )
 
+    # Interactive review button section
+    review_section = ""
+    if has_review_html:
+        review_section = f"""
+<div class="card" style="background:#e8f5e9;">
+<h2>交互复核</h2>
+<p>已生成 <code>review.html</code>，可在浏览器中逐条确认/跳过修正。</p>
+<p><button onclick="window.open('review.html', '_blank')" style="padding:10px 20px;font-size:16px;">
+打开交互复核页面
+</button></p>
+<p style="color:#666;font-size:13px;">提示：交互复核需启动本地HTTP服务器（端口8765+），
+或直接在浏览器中打开静态页面查看。</p>
+</div>"""
+    elif has_review:
+        review_section = f"""
+<div class="card" style="background:#fff3e0;">
+<h2>复核队列已导出</h2>
+<p><code>review_queue/</code> 包含 {review_n} 个待复核样本。</p>
+<p>运行「Open Interactive Review」可启动交互复核服务器。</p>
+</div>"""
+
     index_path = os.path.join(out_dir, "index.html")
     doc = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"/>
@@ -375,6 +404,7 @@ th {{ background: #eee; }}
 .gt {{ color: #0a0; font-weight: bold; }}
 .findings li {{ line-height: 1.55; }}
 code {{ font-size: 12px; word-break: break-all; }}
+.preview-note {{ color:#888;font-size:12px;margin-top:8px; }}
 </style></head><body>
 <h1>标注自修正报告 (Label Self-Refine)</h1>
 <div class="card">
@@ -382,7 +412,7 @@ code {{ font-size: 12px; word-break: break-all; }}
 <p>数据集: <code>{html.escape(data_yaml or '—')}</code></p>
 <p>报告目录: <code>{html.escape(out_dir)}</code></p>
 <p>CSV: <code>{html.escape(os.path.basename(csv_path))}</code>
- | JSON: <code>label_self_refine_summary.json</code>
+| JSON: <code>label_self_refine_summary.json</code>
 {" | review_queue: 已导出" if has_review else ""}</p>
 <div class="metrics">
   <div class="metric"><b>{total_images}</b>评估图像</div>
@@ -392,9 +422,6 @@ code {{ font-size: 12px; word-break: break-all; }}
   <div class="metric"><b>{lines_dropped}</b>删除行数</div>
   <div class="metric"><b>{lines_added}</b>新增行数</div>
 </div>
-<p class="legend"><span class="gt">■ 绿框 = GT</span>
-<span class="pred" style="color:#c00;font-weight:bold">■ 红框 = 预测</span>
- | 交互复核请运行 FishVision/ALT「Open Interactive Review」打开 <code>review.html</code></p>
 </div>
 <div class="card"><h2>诊断摘要</h2>{findings_html}</div>
 <div class="card"><h2>动作统计</h2>
@@ -410,17 +437,11 @@ code {{ font-size: 12px; word-break: break-all; }}
 {"".join(pair_rows) if pair_rows else "<tr><td colspan='3'>无</td></tr>"}
 </table></div>
 {"<div class='card'><h2>规则参数</h2>" + rules_txt + "</div>" if rules_txt else ""}
-<div class="card"><h2>待复核样本预览</h2>
+{review_section}
+<div class="card"><h2>代表性样本预览（前{max_preview}条）</h2>
+<p class="preview-note">仅展示少量代表性样本。完整预览请使用交互复核。</p>
 <table><tr><th>#</th><th>预览</th><th>文件</th><th>split</th><th>类型</th><th>详情</th></tr>
-{_samples_html(review_samples, max_preview)}
-</table></div>
-<div class="card"><h2>类别修正样本预览</h2>
-<table><tr><th>#</th><th>预览</th><th>文件</th><th>split</th><th>类型</th><th>详情</th></tr>
-{_samples_html(fix_samples, min(24, max_preview))}
-</table></div>
-<div class="card"><h2>低分删除样本预览</h2>
-<table><tr><th>#</th><th>预览</th><th>文件</th><th>split</th><th>类型</th><th>详情</th></tr>
-{_samples_html(drop_samples, min(12, max_preview))}
+{_samples_html(review_samples + fix_samples, max_preview)}
 </table></div>
 </body></html>"""
 

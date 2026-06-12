@@ -647,6 +647,22 @@ class LabelSelfRefineDialog(QDialog):
         oh.addWidget(obtn)
         obtn.clicked.connect(lambda: _browse_dir(self.out_edit, self, 'Report output folder'))
 
+        # Mode selection: dropdown instead of checkboxes
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([
+            '完整运行 (推理 + 报告 + 复核导出)',
+            'Review-only (复用CSV导出复核队列)',
+            'HTML-only (仅生成HTML摘要)',
+        ])
+        mode_val = defaults.get('mode', 'full')
+        if mode_val == 'review_only':
+            self.mode_combo.setCurrentIndex(1)
+        elif mode_val == 'html_only':
+            self.mode_combo.setCurrentIndex(2)
+        else:
+            self.mode_combo.setCurrentIndex(0)
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+
         self.split_train = QCheckBox('train')
         self.split_val = QCheckBox('val')
         self.split_test = QCheckBox('test')
@@ -688,16 +704,6 @@ class LabelSelfRefineDialog(QDialog):
         self.review_check = QCheckBox('Export uncertain samples to review_queue/')
         self.review_check.setChecked(defaults.get('export_review', True))
 
-        self.review_only_check = QCheckBox(
-            'Review queue only (reuse report CSV, skip inference)')
-        self.review_only_check.setChecked(defaults.get('review_only', False))
-        self.review_only_check.toggled.connect(self._on_review_only_toggled)
-
-        self.html_only_check = QCheckBox(
-            'HTML summary only (from existing CSV, skip inference & review export)')
-        self.html_only_check.setChecked(defaults.get('html_only', False))
-        self.html_only_check.toggled.connect(self._on_html_only_toggled)
-
         self.export_html_check = QCheckBox('Generate HTML summary (index.html)')
         self.export_html_check.setChecked(defaults.get('export_html', True))
 
@@ -708,6 +714,7 @@ class LabelSelfRefineDialog(QDialog):
         form.addRow('Weights (best.pt):', wrow)
         form.addRow('data.yaml:', yrow)
         form.addRow('Report output:', orow)
+        form.addRow('运行模式:', self.mode_combo)
         form.addRow('Splits:', split_row)
         form.addRow('Match IoU:', self.iou_spin)
         form.addRow('Min conf to fix class:', self.fix_conf_spin)
@@ -717,8 +724,6 @@ class LabelSelfRefineDialog(QDialog):
         form.addRow('', self.fix_class_check)
         form.addRow('', self.cross_dedup_check)
         form.addRow('', self.review_check)
-        form.addRow('', self.review_only_check)
-        form.addRow('', self.html_only_check)
         form.addRow('', self.export_html_check)
         form.addRow('', self.interactive_review_check)
         root.addLayout(form)
@@ -740,12 +745,8 @@ class LabelSelfRefineDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
-        if defaults.get('review_only'):
-            self.review_only_check.setChecked(True)
-            self._on_review_only_toggled(True)
-        if defaults.get('html_only'):
-            self.html_only_check.setChecked(True)
-            self._on_html_only_toggled(True)
+        # Initialize mode state
+        self._on_mode_changed(self.mode_combo.currentIndex())
 
     def _refine_widgets_full_run(self):
         return (
@@ -755,28 +756,22 @@ class LabelSelfRefineDialog(QDialog):
             self.review_check,
         )
 
-    def _on_review_only_toggled(self, checked: bool):
-        if checked and self.html_only_check.isChecked():
-            self.html_only_check.setChecked(False)
-        self._sync_offline_modes()
-
-    def _on_html_only_toggled(self, checked: bool):
-        if checked and self.review_only_check.isChecked():
-            self.review_only_check.setChecked(False)
-        self._sync_offline_modes()
-
-    def _sync_offline_modes(self):
-        offline = self.review_only_check.isChecked() or self.html_only_check.isChecked()
+    def _on_mode_changed(self, idx: int):
+        """Sync UI based on mode dropdown selection."""
+        offline = idx in (1, 2)  # review_only or html_only
         for w in self._refine_widgets_full_run():
             w.setEnabled(not offline)
-        self.weights_edit.setEnabled(True)
-        if self.review_only_check.isChecked():
+        self.weights_edit.setEnabled(not offline)
+        
+        if idx == 1:  # review_only
             self.review_check.setChecked(True)
-        if self.html_only_check.isChecked():
+            self.export_html_check.setEnabled(True)
+            self.interactive_review_check.setEnabled(True)
+        elif idx == 2:  # html_only
             self.export_html_check.setChecked(True)
             self.export_html_check.setEnabled(False)
             self.interactive_review_check.setEnabled(True)
-        elif not offline:
+        else:  # full
             self.export_html_check.setEnabled(True)
             self.interactive_review_check.setEnabled(True)
 
@@ -794,7 +789,8 @@ class LabelSelfRefineDialog(QDialog):
         if not self.out_edit.text().strip():
             QMessageBox.warning(self, 'Label Self-Refine', 'Please select report output folder.')
             return
-        if self.html_only_check.isChecked() or self.review_only_check.isChecked():
+        mode_idx = self.mode_combo.currentIndex()
+        if mode_idx in (1, 2):  # review_only or html_only
             csv_path = self._report_csv_path()
             if not csv_path or not os.path.isfile(csv_path):
                 QMessageBox.warning(
@@ -821,6 +817,8 @@ class LabelSelfRefineDialog(QDialog):
             splits.append('val')
         if self.split_test.isChecked():
             splits.append('test')
+        mode_idx = self.mode_combo.currentIndex()
+        mode = 'full' if mode_idx == 0 else ('review_only' if mode_idx == 1 else 'html_only')
         return {
             'weights': self.weights_edit.text().strip(),
             'data_yaml': self.yaml_edit.text().strip(),
@@ -834,10 +832,11 @@ class LabelSelfRefineDialog(QDialog):
             'fix_wrong_class': self.fix_class_check.isChecked(),
             'cross_class_dedup': self.cross_dedup_check.isChecked(),
             'export_review': self.review_check.isChecked(),
-            'review_only': self.review_only_check.isChecked(),
-            'html_only': self.html_only_check.isChecked(),
+            'review_only': mode == 'review_only',
+            'html_only': mode == 'html_only',
             'export_html': self.export_html_check.isChecked(),
             'open_interactive_review': self.interactive_review_check.isChecked(),
+            'mode': mode,
         }
 
 
