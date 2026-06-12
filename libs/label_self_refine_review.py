@@ -156,6 +156,53 @@ def build_review_manifest(
         gts = load_gt_boxes(a.label_path, names, img_w, img_h) if img_w > 0 else []
         preds = pred_cache.get(str(Path(a.image_path).resolve()), []) if a.image_path else []
 
+        # Find the box to highlight (the one being modified)
+        highlight_box = None
+        matched_gt = None
+        
+        if applicable and img_w > 0 and old_line:
+            old_parts = old_line.split()
+            # Find matching GT box based on old_line
+            if len(old_parts) >= 5:
+                for gt in gts:
+                    # Match by class + bbox coordinates
+                    gt_cls = str(int(gt.cls))
+                    gt_xc = (gt.xyxy[0] + gt.xyxy[2]) / 2 / img_w
+                    gt_yc = (gt.xyxy[1] + gt.xyxy[3]) / 2 / img_h
+                    gt_w = (gt.xyxy[2] - gt.xyxy[0]) / img_w
+                    gt_h = (gt.xyxy[3] - gt.xyxy[1]) / img_h
+                    # Compare class and approximate bbox (within tolerance)
+                    if gt_cls == old_parts[0]:
+                        try:
+                            ox, oy, ow, oh = float(old_parts[1]), float(old_parts[2]), float(old_parts[3]), float(old_parts[4])
+                            if abs(gt_xc - ox) < 0.02 and abs(gt_yc - oy) < 0.02:
+                                matched_gt = gt
+                                break
+                        except (ValueError, IndexError):
+                            pass
+                # Fallback: match by class only if bbox match failed
+                if matched_gt is None:
+                    for gt in gts:
+                        if str(int(gt.cls)) == old_parts[0]:
+                            matched_gt = gt
+                            break
+            if matched_gt is not None:
+                highlight_box = matched_gt
+
+        # For add_pred action, highlight the prediction box
+        if a.action == "add_pred" and preds and not highlight_box:
+            # Find prediction that matches new_line
+            if new_line:
+                new_parts = new_line.split()
+                if len(new_parts) >= 5:
+                    for pred in preds:
+                        p_cls = str(int(pred.cls))
+                        if p_cls == new_parts[0]:
+                            highlight_box = pred
+                            break
+            if highlight_box is None and preds:
+                highlight_box = preds[0]
+
         if applicable and (not new_line or new_line.endswith("...")) and img_w > 0:
             if a.action in ("fix_class", "review_class") and old_line and preds and gts:
                 from libs.test_report import boxes_to_yolo_text, match_boxes
@@ -196,6 +243,7 @@ def build_review_manifest(
                 img = draw_comparison(
                     a.image_path, gts, preds,
                     title=f"{a.action}",
+                    highlight_box=highlight_box,
                 )
                 pname = f"review_{idx:05d}.jpg"
                 _imwrite(str(preview_dir / pname), img)

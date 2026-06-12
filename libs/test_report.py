@@ -602,7 +602,14 @@ def draw_comparison(
     gts: List[Box],
     preds: List[Box],
     title: str = "",
+    highlight_box: Optional[Box] = None,
 ) -> np.ndarray:
+    """Draw GT (green) and prediction (red) boxes on image.
+    
+    Args:
+        highlight_box: Optional box to highlight with yellow/orange color and thicker border.
+                       Used in interactive review to show which box is being modified.
+    """
     img = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         img = cv2.imread(image_path)
@@ -614,23 +621,53 @@ def draw_comparison(
     font = _cjk_font(20)
     title_font = _cjk_font(24)
 
+    # Draw regular GT boxes (green)
     for gt in gts:
         x1, y1, x2, y2 = map(int, gt.xyxy)
-        draw.rectangle((x1, y1, x2, y2), outline=(0, 200, 0), width=2)
-        lbl = f"GT:{gt.name}"
-        if gt.conf is not None and float(gt.conf) < 1.0:
-            lbl += f" {float(gt.conf):.2f}"
-        _, _, _, th = _text_bbox(font, lbl)
-        ty = max(0, y1 - th - 4)
-        draw.text((x1, ty), lbl, font=font, fill=(0, 200, 0))
+        # Check if this is the highlight box
+        is_highlight = (
+            highlight_box is not None
+            and gt.xyxy == highlight_box.xyxy
+        )
+        if is_highlight:
+            # Highlight: orange/yellow, thicker border
+            draw.rectangle((x1, y1, x2, y2), outline=(255, 165, 0), width=4)
+            lbl = f"★GT:{gt.name}"
+            if gt.conf is not None and float(gt.conf) < 1.0:
+                lbl += f" {float(gt.conf):.2f}"
+            _, _, _, th = _text_bbox(font, lbl)
+            ty = max(0, y1 - th - 4)
+            draw.text((x1, ty), lbl, font=font, fill=(255, 165, 0))
+        else:
+            draw.rectangle((x1, y1, x2, y2), outline=(0, 200, 0), width=2)
+            lbl = f"GT:{gt.name}"
+            if gt.conf is not None and float(gt.conf) < 1.0:
+                lbl += f" {float(gt.conf):.2f}"
+            _, _, _, th = _text_bbox(font, lbl)
+            ty = max(0, y1 - th - 4)
+            draw.text((x1, ty), lbl, font=font, fill=(0, 200, 0))
 
+    # Draw regular prediction boxes (red)
     for pred in preds:
         x1, y1, x2, y2 = map(int, pred.xyxy)
-        draw.rectangle((x1, y1, x2, y2), outline=(255, 0, 0), width=2)
-        lbl = f"P:{pred.name} {pred.conf:.2f}"
-        _, _, _, th = _text_bbox(font, lbl)
-        ty = min(pil.height - th - 2, y2 + 4)
-        draw.text((x1, ty), lbl, font=font, fill=(255, 0, 0))
+        # Check if this is the highlight box
+        is_highlight = (
+            highlight_box is not None
+            and pred.xyxy == highlight_box.xyxy
+        )
+        if is_highlight:
+            # Highlight: orange/yellow, thicker border
+            draw.rectangle((x1, y1, x2, y2), outline=(255, 165, 0), width=4)
+            lbl = f"★P:{pred.name} {pred.conf:.2f}"
+            _, _, _, th = _text_bbox(font, lbl)
+            ty = min(pil.height - th - 2, y2 + 4)
+            draw.text((x1, ty), lbl, font=font, fill=(255, 165, 0))
+        else:
+            draw.rectangle((x1, y1, x2, y2), outline=(255, 0, 0), width=2)
+            lbl = f"P:{pred.name} {pred.conf:.2f}"
+            _, _, _, th = _text_bbox(font, lbl)
+            ty = min(pil.height - th - 2, y2 + 4)
+            draw.text((x1, ty), lbl, font=font, fill=(255, 0, 0))
 
     if title:
         draw.text((8, 6), title, font=title_font, fill=(255, 255, 255))
