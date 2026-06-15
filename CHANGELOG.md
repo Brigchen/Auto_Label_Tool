@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented here.
 
+## [3.5.1] – 2026-06-12
+
+### Fixed
+
+- **difficult/score conversion**: score > 0.5 → difficult=0 (not difficult), score ≤ 0.5 → difficult=1 (difficult) in both `yolo_io.split_yolo_difficult_and_score()` and `labelFile.py` Pascal VOC save path.
+- **Interactive review previews**: now generates unlimited preview images for ALL applicable pending items (was capped at 200). `build_review_manifest` default `max_previews=0` means unlimited.
+- **Review detail field**: `review_class` action now shows `{gt_name} -> {pred_name} (IoU=..., conf=...)` instead of generic `class mismatch`; `drop_low_score` and `drop_unmatched_gt` now include class name; `review_fn` includes class name.
+- **TensorBoard on Windows**: `--logdir` now points to project base directory (e.g. `runs/detect/fish`) so all sub-runs are auto-discovered and selectable in the left panel.
+- **Review.html static mode**: embedded manifest JSON inline to avoid CORS `Failed to fetch` when opened directly from file system. Server mode now force-rebuilds manifest before starting to ensure all previews are generated.
+
+### Changed
+
+- **Label Self-Refine dialog**: mode selection changed from two checkboxes (`review_only`, `html_only`) to a dropdown with 3 clear options. All dialog parameters now persist to `config_FVT.ini` and are restored on next open.
+- **Label Self-Refine HTML report**: `index.html` simplified to show statistics + diagnosis only, with 10 representative sample previews per action type. Removed interactive review link.
+- **Review.html**: removed static-mode fallback detection. Pure server mode only (must be started via Trainer). Simplified JS code.
+- **Preview images**: highlight box now uses **orange** border (width 4px) with `★` prefix label for easy identification in multi-target scenes.
+
+### Added
+
+- **Preview highlight**: `draw_comparison()` accepts new `highlight_box` parameter. `build_review_manifest` automatically locates the target box by matching `old_line`/`new_line` and passes it for highlighted rendering.
+
+---
+
 ## [3.5.0] – 2026-06-12
 
 ### Added

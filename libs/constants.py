@@ -58,12 +58,14 @@ SETTING_UW_OFFLINE_SPLIT_TRAIN = 'uw_offline/split_train'
 SETTING_UW_OFFLINE_SPLIT_VAL = 'uw_offline/split_val'
 SETTING_UW_OFFLINE_SPLIT_TEST = 'uw_offline/split_test'
 DEFAULT_ENCODING = 'utf-8'
-APP_VERSION = '3.5.0'
+APP_VERSION = '3.5.1'
 APP_UPDATE_DATE = '2026-6-12'
 APP_CHANGELOG = [
-    'Label Self-Refine: GT vs pred comparison, conservative auto-fix, dry-run, interactive review',
-    'Training Diagnosis: data gaps, weak classes, confusion pairs, actionable suggestions',
-    'Underwater Augment: offline batch + online training hook (attenuation, haze, turbidity, etc.)',
-    'Cross-class dedup: remove overlapping boxes across different classes during auto-label',
-    'Test report: export Predict labels (with conf) for low-score samples; Make Datasets test split',
+    'Fix: difficult/score conversion rule (score>0.5→not difficult)',
+    'Refactor: Label Self-Refine parameter persistence, mode dropdown, simplified reports',
+    'Fix: interactive review now generates unlimited previews for all pending items',
+    'Fix: review.html embedded manifest for static mode + server force-rebuild before start',
+    'Feat: highlight target box with orange border in review preview images',
+    'Fix: review/review action detail now shows class name suggestions',
+    'Fix: TensorBoard on Windows uses project base dir for multi-run discovery',
 ]
