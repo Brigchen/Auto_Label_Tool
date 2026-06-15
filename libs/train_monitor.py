@@ -103,41 +103,38 @@ def pick_tensorboard_logdir(
     repo: str = "",
 ) -> Tuple[str, str]:
     """Choose logdir with event files; return (path, user hint).
+
+    Strategy (all platforms):
+      1. Prefer the specific current run directory (e.g. runs/detect/fish/train3)
+         if it exists or has event files — most reliable for immediate dashboards.
+      2. Fall back to project base directory (runs/detect/fish) — allows TB to
+         auto-discover all sub-runs (train, train2, …) in the left panel.
+      3. Fall back to runs/ root as last resort.
     
-    On Windows, --logdir_spec has colon conflicts with drive letters (C:).
-    Instead, we point --logdir to the project base directory so TensorBoard
-    can auto-discover all sub-runs (train, train2, ...) and show them in
-    the left panel for selection.
+    On Windows, --logdir_spec is NOT used because colon conflicts with drive
+    letters (C:). Use --logdir with the chosen path instead.
     """
     cur_run = find_latest_run_dir(task, project, name, repo)
     run_base = resolve_run_base(task, project, repo)
     runs_root = os.path.join(repo or _repo_root_fallback(), "runs")
 
-    # On Windows: use project base dir so TB discovers all runs
-    # On other OS: prefer specific run dir (logdir_spec handles multi-run)
-    if os.name == "nt":
-        # Use project base directory for auto-discovery of all runs
-        if has_tensorboard_events(run_base):
-            return normalize_tb_logdir(run_base), f"项目目录（含多个run）: {os.path.basename(run_base)}"
-        if has_tensorboard_events(runs_root):
-            return normalize_tb_logdir(runs_root), f"runs 根目录: {runs_root}"
-        # No events yet - still point to project base so TB picks up new runs
-        if os.path.isdir(run_base):
-            return normalize_tb_logdir(run_base), f"项目目录: {os.path.basename(run_base)}"
+    # ── Priority 1: specific current run directory ──
+    if has_tensorboard_events(cur_run):
+        return normalize_tb_logdir(cur_run), f"当前 run: {os.path.basename(cur_run)}"
+    # ── Priority 2: project base directory (allows multi-run discovery) ──
+    if has_tensorboard_events(run_base):
+        return normalize_tb_logdir(run_base), f"项目目录（含多个run）: {os.path.basename(run_base)}"
+    # ── Priority 3: runs root ──
+    if has_tensorboard_events(runs_root):
         return normalize_tb_logdir(runs_root), f"runs 根目录: {runs_root}"
-    else:
-        # Non-Windows: use logdir_spec for named run selection
-        if has_tensorboard_events(cur_run):
-            return normalize_tb_logdir(cur_run), f"当前 run: {os.path.basename(cur_run)}"
-        if has_tensorboard_events(run_base):
-            return normalize_tb_logdir(run_base), f"任务目录: {run_base}"
-        if has_tensorboard_events(runs_root):
-            return normalize_tb_logdir(runs_root), f"runs 根目录: {runs_root}"
-        if os.path.isdir(cur_run):
-            return normalize_tb_logdir(cur_run), (
-                f"当前 run（尚无 TensorBoard 事件文件）: {os.path.basename(cur_run)}"
-            )
-        return normalize_tb_logdir(run_base), f"任务目录: {run_base}"
+    # ── No events yet: use most specific available path ──
+    if os.path.isdir(cur_run):
+        return normalize_tb_logdir(cur_run), (
+            f"当前 run（尚无 TensorBoard 事件文件）: {os.path.basename(cur_run)}"
+        )
+    if os.path.isdir(run_base):
+        return normalize_tb_logdir(run_base), f"项目目录: {os.path.basename(run_base)}"
+    return normalize_tb_logdir(runs_root), f"runs 根目录: {runs_root}"
 
 
 def _repo_root_fallback() -> str:
