@@ -998,6 +998,25 @@ class _HardwareTab(QWidget):
             "首次可能等待数分钟；若长时间卡住可取消勾选"
         )
 
+        self.clip_grad_cb = QCheckBox("梯度裁剪 (clip_grad_norm)")
+        self.clip_grad_cb.setChecked(False)
+        self.clip_grad_cb.setToolTip(
+            "防止梯度爆炸；对水下图像 / 小目标 / 大 lr 训练场景有益\n"
+            "max_norm=10.0 是常用默认值，可按需调整"
+        )
+
+        self.clip_grad_norm_spin = QDoubleSpinBox()
+        self.clip_grad_norm_spin.setRange(0.1, 100.0)
+        self.clip_grad_norm_spin.setValue(10.0)
+        self.clip_grad_norm_spin.setSingleStep(1.0)
+        self.clip_grad_norm_spin.setDecimals(1)
+        self.clip_grad_norm_spin.setSuffix("  (max_norm)")
+        self.clip_grad_norm_spin.setFixedWidth(130)
+        self.clip_grad_norm_spin.setEnabled(False)
+        self.clip_grad_cb.stateChanged.connect(
+            lambda s: self.clip_grad_norm_spin.setEnabled(s == 2)
+        )
+
         self.save_period_spin = QSpinBox()
         self.save_period_spin.setRange(-1, 1000)
         self.save_period_spin.setValue(-1)
@@ -1014,6 +1033,11 @@ class _HardwareTab(QWidget):
         fm.addRow("", self.val_cb)
         fm.addRow("", self.plots_cb)
         fm.addRow("", self.amp_cb)
+        clip_grad_row = QHBoxLayout()
+        clip_grad_row.addWidget(self.clip_grad_cb)
+        clip_grad_row.addWidget(self.clip_grad_norm_spin)
+        clip_grad_row.addStretch()
+        fm.addRow("", clip_grad_row)
         fm.addRow("Save Period:", self.save_period_spin)
         fm.addRow("Cache:", self.cache_combo)
         gb.setLayout(fm)
@@ -1030,7 +1054,10 @@ class _HardwareTab(QWidget):
             "val": self.val_cb.isChecked(),
             "plots": self.plots_cb.isChecked(),
             "amp": self.amp_cb.isChecked(),
+            "clip_grad": self.clip_grad_cb.isChecked(),
         }
+        if self.clip_grad_cb.isChecked():
+            vals["clip_grad_norm"] = self.clip_grad_norm_spin.value()
         if self.save_period_spin.value() > 0:
             vals["save_period"] = self.save_period_spin.value()
         cache = self.cache_combo.currentText()
@@ -1057,6 +1084,11 @@ class _HardwareTab(QWidget):
             self.plots_cb.setChecked(str(d["plots"]).lower() in ("1", "true", "yes"))
         if "amp" in d:
             self.amp_cb.setChecked(str(d["amp"]).lower() in ("1", "true", "yes"))
+        if "clip_grad" in d:
+            self.clip_grad_cb.setChecked(str(d["clip_grad"]).lower() in ("1", "true", "yes"))
+            self.clip_grad_norm_spin.setEnabled(str(d["clip_grad"]).lower() in ("1", "true", "yes"))
+        if d.get("clip_grad_norm") is not None:
+            self.clip_grad_norm_spin.setValue(float(d["clip_grad_norm"]))
         if "cache" in d:
             idx = self.cache_combo.findText(str(d["cache"]))
             if idx >= 0:
@@ -2020,10 +2052,11 @@ class TabbedTrainGUI(QWidget):
         "shear", "perspective", "flipud", "fliplr", "mosaic", "mixup",
         "copy_paste", "erasing",
         "uw_augment_p", "uw_augment_strength",
+        "clip_grad_norm",
     )
     _BOOL_INI_KEYS = (
         "pretrained", "resume", "exist_ok", "val", "plots", "amp", "tune_enabled", "cos_lr",
-        "uw_augment", "uw_include_enhance",
+        "uw_augment", "uw_include_enhance", "clip_grad",
     )
 
     def _session_config_path(self) -> str:

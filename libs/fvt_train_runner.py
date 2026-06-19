@@ -583,6 +583,12 @@ def normalize_train_kwargs(raw: dict, model=None) -> dict:
     for k in _UW_TRAIN_KEYS:
         kw.pop(k, None)
 
+    # Gradient clipping
+    if kw.get("clip_grad") and kw.get("clip_grad_norm") is not None:
+        kw["max_norm"] = float(kw.pop("clip_grad_norm"))
+    kw.pop("clip_grad", None)
+    kw.pop("clip_grad_norm", None)
+
     schedule = str(kw.pop("lr_schedule", "") or "").lower()
     kw.pop("lr_cos_tmax", None)
     if schedule:
@@ -758,6 +764,8 @@ def run_training(
             f"LR: lr0={params.get('lr0')} lrf={params.get('lrf')} schedule={sched} amp={kw.get('amp')}",
             log,
         )
+        if kw.get("max_norm") is not None:
+            _log_ts(f"梯度裁剪: max_norm={kw.get('max_norm')}", log)
         if kw.get("batch") == -1:
             _log_ts("batch=-1：AMP 检测后将进行显存探测(auto-batch)，可能较慢", log)
         _log_ts(
