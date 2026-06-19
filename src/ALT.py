@@ -467,6 +467,17 @@ class MainWindow(QMainWindow, WindowMixin):
         self.fileCountFilterCheck.stateChanged.connect(self.applyFileListFilters)
         self.fileCountFilterSpin.valueChanged.connect(self.applyFileListFilters)
 
+        # ROI position filters
+        self.fileEdgeFilterCheck = QCheckBox('ROI near edge')
+        self.fileEdgeFilterCheck.setToolTip(
+            '筛选包含贴近图像边线的 ROI 的图片（框中心距边界 < 10%）')
+        self.fileEdgeFilterCheck.stateChanged.connect(self.applyFileListFilters)
+
+        self.fileLargeFilterCheck = QCheckBox('ROI large (>50%)')
+        self.fileLargeFilterCheck.setToolTip(
+            '筛选包含大面积 ROI 的图片（单个框覆盖 > 50% 图像面积）')
+        self.fileLargeFilterCheck.stateChanged.connect(self.applyFileListFilters)
+
         speciesRow = QHBoxLayout()
         speciesRow.setContentsMargins(0, 0, 0, 0)
         speciesRow.addWidget(QLabel('Species:'))
@@ -479,9 +490,15 @@ class MainWindow(QMainWindow, WindowMixin):
         countRow.setContentsMargins(0, 0, 0, 0)
         countRow.addWidget(self.fileCountFilterCheck)
         countRow.addWidget(self.fileCountFilterSpin)
+        roiRow = QHBoxLayout()
+        roiRow.setContentsMargins(0, 0, 0, 0)
+        roiRow.addWidget(self.fileEdgeFilterCheck)
+        roiRow.addWidget(self.fileLargeFilterCheck)
+        roiRow.addStretch()
         filelistLayout.addLayout(speciesRow)
         filelistLayout.addLayout(scoreRow)
         filelistLayout.addLayout(countRow)
+        filelistLayout.addLayout(roiRow)
         filelistLayout.addWidget(self.fileListWidget)
         fileListContainer = QWidget()
         fileListContainer.setLayout(filelistLayout)
@@ -2780,7 +2797,7 @@ class MainWindow(QMainWindow, WindowMixin):
         return None
 
     def _readFileAnnoMeta(self, imgPath):
-        meta = {'species': set(), 'scores': [], 'count': 0}
+        meta = {'species': set(), 'scores': [], 'count': 0, 'has_edge_box': False, 'has_large_box': False}
         label_path = self._guessLabelPathForImage(imgPath)
         if not label_path:
             return meta
@@ -2788,6 +2805,10 @@ class MainWindow(QMainWindow, WindowMixin):
         if label_path.lower().endswith('.xml'):
             tree = ET.ElementTree(file=label_path)
             root = tree.getroot()
+            w_node = root.find('size/width')
+            h_node = root.find('size/height')
+            img_w = int(w_node.text) if w_node is not None and w_node.text else 1
+            img_h = int(h_node.text) if h_node is not None and h_node.text else 1
             count = 0
             species = set()
             for obj in root.findall('object'):
@@ -2795,6 +2816,27 @@ class MainWindow(QMainWindow, WindowMixin):
                 name_node = obj.find('name')
                 if name_node is not None and name_node.text:
                     species.add(name_node.text.strip())
+                # Check ROI edge / large-box from bbox in XML
+                bndbox = obj.find('bndbox')
+                if bndbox is not None:
+                    try:
+                        xmin = float(bndbox.find('xmin').text)
+                        ymin = float(bndbox.find('ymin').text)
+                        xmax = float(bndbox.find('xmax').text)
+                        ymax = float(bndbox.find('ymax').text)
+                        cx = (xmin + xmax) / 2.0 / img_w
+                        cy = (ymin + ymax) / 2.0 / img_h
+                        bw = (xmax - xmin) / img_w
+                        bh = (ymax - ymin) / img_h
+                        # Near edge: center within 10% of any edge
+                        edge_thr = 0.10
+                        if cx < edge_thr or cx > (1 - edge_thr) or cy < edge_thr or cy > (1 - edge_thr):
+                            meta['has_edge_box'] = True
+                        # Large box: covers > 50% of image (each dim > sqrt(0.5) ≈ 0.707)
+                        if bw * bh > 0.5:
+                            meta['has_large_box'] = True
+                    except Exception:
+                        pass
             meta['species'] = species
             meta['count'] = count
             return meta
@@ -2825,6 +2867,22 @@ class MainWindow(QMainWindow, WindowMixin):
                     scores.append(float(parts[5]))
                 except Exception:
                     pass
+            # Check ROI edge / large-box from YOLO bbox (cx, cy, w, h in normalized coords)
+            try:
+                if len(parts) >= 5:
+                    cx = float(parts[1])
+                    cy = float(parts[2])
+                    bw = float(parts[3])
+                    bh = float(parts[4])
+                    # Near edge: center within 10% of any edge
+                    edge_thr = 0.10
+                    if cx < edge_thr or cx > (1 - edge_thr) or cy < edge_thr or cy > (1 - edge_thr):
+                        meta['has_edge_box'] = True
+                    # Large box: covers > 50% of image area
+                    if bw * bh > 0.5:
+                        meta['has_large_box'] = True
+            except Exception:
+                pass
         meta['species'] = species
         meta['scores'] = scores
         meta['count'] = count
@@ -2890,6 +2948,8 @@ class MainWindow(QMainWindow, WindowMixin):
         score_thr = float(self.fileScoreFilterSpin.value())
         count_active = self.fileCountFilterCheck.isChecked()
         count_thr = int(self.fileCountFilterSpin.value())
+        edge_active = self.fileEdgeFilterCheck.isChecked()
+        large_active = self.fileLargeFilterCheck.isChecked()
 
         has_any_scores = any(
             meta.get('scores') for meta in self.fileAnnoMeta.values()
@@ -2897,14 +2957,14 @@ class MainWindow(QMainWindow, WindowMixin):
         if score_active and not has_any_scores:
             score_active = False
 
-        if not (species_active or score_active or count_active):
+        if not (species_active or score_active or count_active or edge_active or large_active):
             self._setFileListItems(self.allImgList, {})
             return
 
         reasons_map = {}
         filtered = []
         for img_path in self.allImgList:
-            meta = self.fileAnnoMeta.get(img_path, {'species': set(), 'scores': [], 'count': 0})
+            meta = self.fileAnnoMeta.get(img_path, {'species': set(), 'scores': [], 'count': 0, 'has_edge_box': False, 'has_large_box': False})
             ok = True
             if species_active:
                 ok = ok and (selected_species in meta.get('species', set()))
@@ -2912,6 +2972,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 ok = ok and any((s < score_thr) for s in meta.get('scores', []))
             if count_active:
                 ok = ok and (int(meta.get('count', 0)) > count_thr)
+            if edge_active:
+                ok = ok and meta.get('has_edge_box', False)
+            if large_active:
+                ok = ok and meta.get('has_large_box', False)
             if not ok:
                 continue
             filtered.append(img_path)
@@ -2922,6 +2986,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 tags.append('low-score')
             if count_active:
                 tags.append('many-boxes')
+            if edge_active:
+                tags.append('edge')
+            if large_active:
+                tags.append('large')
             reasons_map[img_path] = tags
         self._setFileListItems(filtered, reasons_map)
 
