@@ -21,7 +21,7 @@ import libs.env_bootstrap  # noqa: F401,E402  # before torch
 import torch
 from ultralytics import YOLO
 
-from libs.lr_schedules import install_lr_schedule_hooks, resolve_cos_lr
+from libs.lr_schedules import install_lr_schedule_hooks, resolve_cos_lr, ONECYCLE_PCT_START
 from libs.repo_paths import repo_root
 from libs.train_monitor import (
     enable_ultralytics_tensorboard,
@@ -810,6 +810,7 @@ def run_training(
             schedule=schedule,
             lrf=float(params.get("lrf", 0.01)),
             cos_tmax_frac=float(params.get("lr_cos_tmax", 0.75)),
+            onecycle_pct_start=ONECYCLE_PCT_START,
             log=log,
         )
         try:

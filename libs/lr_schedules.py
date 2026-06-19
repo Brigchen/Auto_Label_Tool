@@ -17,16 +17,43 @@ SCHEDULE_CHOICES = (
 SCHEDULE_LABELS = {k: v for k, v in SCHEDULE_CHOICES}
 
 
-def _onecycle_epoch_lf(lrf: float, epochs: int):
-    """Epoch-level 1-cycle envelope: lr0×lrf → lr0 → lr0×lrf (Smith-style, per epoch)."""
+# OneCycleLR default parameters
+ONECYCLE_MAX_LR = 3e-3
+ONECYCLE_DIV_FACTOR = 20.0          # initial_lr = max_lr / div_factor
+ONECYCLE_FINAL_DIV_FACTOR = 10000.0  # final_lr = max_lr / final_div_factor
+ONECYCLE_PCT_START = 0.3            # warmup for first 30% of epochs
+ONECYCLE_ANNEAL_STRATEGY = "cos"   # cosine annealing
+
+
+def _onecycle_epoch_lf(lrf: float, epochs: int, pct_start: float = 0.3):
+    """Epoch-level 1-cycle envelope: lr0×lrf → max_lr → lr0×lrf (Smith-style).
+
+    Warmup: linear from min_lr (lr0×lrf) to max_lr over pct_start of total epochs.
+    Anneal: cosine from max_lr back to min_lr for the remaining (1 - pct_start).
+    
+    min_lr = lr0 × lrf  (where lrf = 1 / final_div_factor)
+    max_lr = lr0 × div_factor
+    """
+    min_lr_mult = max(1e-7, float(lrf))        # = 1 / final_div_factor
+    max_lr_mult = 1.0                          # peak multiplier (lr0)
+    warmup_epochs = max(1, int(epochs * max(0.05, min(0.95, pct_start))))
 
     def lf(epoch: int) -> float:
         if epochs <= 1:
-            return 1.0
-        t = epoch / (epochs - 1)
-        if t <= 0.5:
-            return lrf + (1.0 - lrf) * (t / 0.5)
-        return 1.0 - (1.0 - lrf) * ((t - 0.5) / 0.5)
+            return min_lr_mult
+        if epoch <= 0:
+            return min_lr_mult
+        t = epoch / (epochs - 1)               # fractional progress [0, 1]
+        pct = epoch / epochs                   # fraction of total epochs
+        if pct <= pct_start:
+            # Linear warmup from min_lr to max_lr
+            frac = pct / max(pct_start, 1e-6)
+            return min_lr_mult + (max_lr_mult - min_lr_mult) * frac
+        else:
+            # Cosine annealing from max_lr to min_lr
+            frac = (pct - pct_start) / max(1.0 - pct_start, 1e-6)
+            return max_lr_mult - (max_lr_mult - min_lr_mult) * (0.5 * (1 + math.cos(math.pi * frac)))
+        return min_lr_mult
 
     return lf
 
@@ -49,6 +76,7 @@ def build_lf(
     lrf: float,
     epochs: int,
     cos_tmax_frac: float = 0.75,
+    onecycle_pct_start: float = ONECYCLE_PCT_START,
 ):
     """Return lr multiplier lf(epoch) used by Ultralytics (actual lr = initial_lr × lf)."""
     lrf = max(1e-7, float(lrf))
@@ -61,7 +89,7 @@ def build_lf(
 
         inner = one_cycle(1, lrf, epochs)
     elif schedule == "onecycle":
-        inner = _onecycle_epoch_lf(lrf, epochs)
+        inner = _onecycle_epoch_lf(lrf, epochs, pct_start=onecycle_pct_start)
     elif schedule == "truncated_cosine":
         inner = _truncated_cosine_lf(lrf, epochs, cos_tmax_frac)
     else:
@@ -79,10 +107,10 @@ def build_lf(
     return lf
 
 
-def _apply_lf_to_trainer(trainer, schedule: str, lrf: float, cos_tmax_frac: float) -> None:
+def _apply_lf_to_trainer(trainer, schedule: str, lrf: float, cos_tmax_frac: float, onecycle_pct_start: float = ONECYCLE_PCT_START) -> None:
     import torch.optim as optim
 
-    lf = build_lf(schedule, lrf, trainer.epochs, cos_tmax_frac)
+    lf = build_lf(schedule, lrf, trainer.epochs, cos_tmax_frac, onecycle_pct_start)
     trainer.lf = lf
     trainer.scheduler = optim.lr_scheduler.LambdaLR(trainer.optimizer, lr_lambda=trainer.lf)
     trainer.scheduler.last_epoch = trainer.start_epoch - 1
@@ -93,6 +121,7 @@ def install_lr_schedule_hooks(
     schedule: str,
     lrf: float,
     cos_tmax_frac: float = 0.75,
+    onecycle_pct_start: float = ONECYCLE_PCT_START,
     log: Optional[LogFn] = None,
 ) -> None:
     """Patch trainer LR setup for onecycle / truncated_cosine (survives pipeline rebuild)."""
@@ -102,16 +131,19 @@ def install_lr_schedule_hooks(
 
     lrf = float(lrf)
     cos_tmax_frac = float(cos_tmax_frac)
+    onecycle_pct_start = float(onecycle_pct_start)
 
     def _on_pretrain_routine_end(trainer) -> None:
         def _custom_setup_scheduler() -> None:
-            _apply_lf_to_trainer(trainer, schedule, lrf, cos_tmax_frac)
+            _apply_lf_to_trainer(trainer, schedule, lrf, cos_tmax_frac, onecycle_pct_start)
 
         trainer._setup_scheduler = _custom_setup_scheduler
         _custom_setup_scheduler()
         if log:
             extra = ""
-            if schedule == "truncated_cosine":
+            if schedule == "onecycle":
+                extra = f", pct_start={onecycle_pct_start:.0%}, final_lr=max_lr/{ONECYCLE_FINAL_DIV_FACTOR:.0f}"
+            elif schedule == "truncated_cosine":
                 extra = f", 余弦阶段={cos_tmax_frac:.0%} epochs"
             log(
                 f"LR schedule: {SCHEDULE_LABELS.get(schedule, schedule)} "

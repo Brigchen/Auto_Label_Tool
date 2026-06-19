@@ -44,7 +44,10 @@ from PyQt5.QtWidgets import (
 from ultralytics import YOLO
 
 from libs.repo_paths import repo_root, configs_dir
-from libs.lr_schedules import SCHEDULE_CHOICES
+from libs.lr_schedules import SCHEDULE_CHOICES, (
+    ONECYCLE_MAX_LR, ONECYCLE_DIV_FACTOR,
+    ONECYCLE_FINAL_DIV_FACTOR, ONECYCLE_PCT_START,
+)
 from libs.yolo_weights import resolve_yolo_checkpoint
 from libs.fvt_train_runner import (
     run_training, audit_cuda_environment, format_cuda_audit_message,
@@ -773,15 +776,26 @@ class _OptimizerTab(QWidget):
         self.lr_schedule_combo.setToolTip(
             "Linear: lr0 → lr0×lrf 线性\n"
             "Cosine: 全周期余弦降至 lr0×lrf\n"
-            "OneCycleLR: 先升至 lr0 再降至 lr0×lrf（按 epoch 包络）\n"
+            "OneCycleLR: 前pct_start%轮次线性升温至lr0，再余弦退火至lr0×lrf\n"
+            "  (默认: pct_start=30%, max_lr=lr0, 初始=max_lr/20, 最终=max_lr/10000)\n"
             "Truncated Cosine: 前若干 epoch 余弦衰减，之后保持 lr0×lrf"
         )
 
-        self.lr0_edit = _SciFloatEdit(0.001, 1e-7, 1.0)
-        self.lr0_edit.setToolTip("初始学习率 lr0（AdamW 常用 1e-3 ~ 1e-2）")
+        self.lr0_edit = _SciFloatEdit(ONECYCLE_MAX_LR, 1e-7, 1.0)
+        self.lr0_edit.setToolTip(
+            f"峰值学习率 max_lr\n"
+            f"  OneCycle: lr0 = max_lr (默认 {ONECYCLE_MAX_LR:.0e})\n"
+            f"  其他调度: 初始学习率"
+        )
 
-        self.lrf_edit = _SciFloatEdit(0.01, 1e-7, 1.0)
-        self.lrf_edit.setToolTip("最低 LR 比例：lr_min = lr0 × lrf")
+        # lrf = 1 / final_div_factor for OneCycleLR
+        default_lrf = 1.0 / ONECYCLE_FINAL_DIV_FACTOR
+        self.lrf_edit = _SciFloatEdit(default_lrf, 1e-7, 1.0)
+        self.lrf_edit.setToolTip(
+            f"最低 LR 倍数 (lrf = 1 / final_div_factor)\n"
+            f"  OneCycle: lr_min = lr0 × lrf (默认 lrf={default_lrf:.0e})\n"
+            f"  其他调度: 最低 LR 比例 = lr0 × lrf"
+        )
 
         self.lr_cos_tmax_spin = _tune_double_spin(0.05, 1.0, 0.75, 2, 0.05)
         self.lr_cos_tmax_spin.setToolTip(
@@ -860,8 +874,15 @@ class _OptimizerTab(QWidget):
         lrf = self.lrf_edit.value()
         sched = self.lr_schedule_combo.currentData() or "linear"
         lr_min = lr0 * lrf
+        lr_init = lr0 / ONECYCLE_DIV_FACTOR if ONECYCLE_DIV_FACTOR else lr0
         if sched == "onecycle":
-            hint = f"→ OneCycle: lr0×lrf={lr_min:.6g} ↑ lr0={lr0:g} ↓ lr0×lrf={lr_min:.6g}"
+            hint = (
+                f"→ OneCycle: "
+                f"max_lr={lr0:.0e}  "
+                f"初始_lr=max_lr/{ONECYCLE_DIV_FACTOR:.0f}={lr_init:.0e}  "
+                f"最终_lr=max_lr/{ONECYCLE_FINAL_DIV_FACTOR:.0f}={lr_min:.0e}  "
+                f"(warmup {ONECYCLE_PCT_START:.0%} epochs)"
+            )
         elif sched == "truncated_cosine":
             pct = self.lr_cos_tmax_spin.value()
             hint = (
